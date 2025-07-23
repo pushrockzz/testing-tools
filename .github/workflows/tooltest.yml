@@ -1,0 +1,173 @@
+name: Testing tools against a file
+
+on:
+  workflow_dispatch: # Allows you to run this workflow manually
+
+permissions:
+  contents: write # We only need to read the repository contents
+
+jobs:
+  prepare-chunks:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.create_chunks.outputs.matrix }}
+      chunk_count: ${{ steps.create_chunks.outputs.chunk_count }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Create Chunks and Matrix
+        id: create_chunks
+        run: |
+          
+
+          
+          # This workflow will look for a file named "targets.txt" in your repo.
+          
+          INPUT_FILE="targets.txt" 
+          CHUNK_SIZE=50
+          
+          # ---------------------
+
+          CHUNK_DIR="chunks"
+
+          if [ ! -f "$INPUT_FILE" ]; then
+            echo "::error::Input file '$INPUT_FILE' not found in the repository root."
+            exit 1
+          fi
+
+          mkdir -p "$CHUNK_DIR"
+          # Split the input file into smaller chunks
+          split -l "$CHUNK_SIZE" --numeric-suffixes=1 --additional-suffix=.txt "$INPUT_FILE" "$CHUNK_DIR/chunk_"
+
+          echo "Created the following chunks:"
+          ls -1 "$CHUNK_DIR"
+
+          # Create a JSON matrix of all the chunk file paths for the next job
+          CHUNK_FILES=("$CHUNK_DIR"/chunk_*.txt)
+          if [ ${#CHUNK_FILES[@]} -eq 0 ]; then
+            echo "::warning::No chunks were created from the input file."
+            echo "matrix=[]" >> $GITHUB_OUTPUT
+            echo "chunk_count=0" >> $GITHUB_OUTPUT
+          else
+            MATRIX=$(jq -R -s 'split("\n") | map(select(length > 0))' < <(printf "%s\n" "${CHUNK_FILES[@]}"))
+            echo "matrix=${MATRIX}" >> $GITHUB_OUTPUT
+            echo "chunk_count=${#CHUNK_FILES[@]}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Chunks as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuclei-chunks
+          path: chunks/
+          retention-days: 1
+
+  run-nuclei-in-parallel:
+    needs: prepare-chunks
+    if: ${{ needs.prepare-chunks.outputs.chunk_count > 0 }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # This creates a parallel job for each file path in the matrix output from the previous job
+        chunk_file: ${{ fromJson(needs.prepare-chunks.outputs.matrix) }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+        with:
+          # Fetch full Git history so previous commits are available for comparison
+          fetch-depth: 0   
+          
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Cache Go modules & binaries
+        uses: actions/cache@v3
+        with:
+          path: |
+            $HOME/go/pkg/mod
+            ~/.cache/go-build
+            $HOME/go/bin
+          key: ${{ runner.os }}-go-cache-${{ github.ref_name }}
+          restore-keys: |
+            ${{ runner.os }}-go-cache-
+
+      - name: Install Tools
+        run: |
+          # Installing httpx
+          if ! command -v httpx >/dev/null; then
+            echo "Installing httpx…"
+            go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          else
+            echo "httpx already in cache"
+          fi    
+
+      - name: Download Chunks Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: nuclei-chunks
+          path: chunks/
+
+      - name: Run Nuclei on Chunk
+        id: run_tool
+        run: |
+          CHUNK_BASENAME=$(basename "${{ matrix.chunk_file }}")
+          OUTPUT_DIR="results"
+          OUTPUT_FILE="$OUTPUT_DIR/result_$CHUNK_BASENAME"
+          mkdir -p "$OUTPUT_DIR"
+
+          echo "Running Nuclei on file: ${{ matrix.chunk_file }}"
+          
+          # --- MANUALLY CONFIGURED COMMAND ---
+          # This is where you write the exact command you want to run.
+          # `${{ matrix.chunk_file }}` is the placeholder for the input list.
+          # `$OUTPUT_FILE` is the placeholder for the output file for this specific chunk.
+
+          
+          httpx  -l "${{ matrix.chunk_file }}" -t 100 -o "$OUTPUT_FILE" -rl 100 -random-agent -delay 200ms -silent 
+          
+          
+          # ------------------------------------
+
+          echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
+
+      - name: Upload Individual Result Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.chunk_file }}
+          path: ${{ steps.run_tool.outputs.output_file }}
+          retention-days: 1 
+
+  aggregate-results:
+    needs: run-nuclei-in-parallel
+    if: always() # This ensures the aggregation job runs even if some nuclei jobs fail
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Temporary Directory for Results
+        run: mkdir -p temp-results
+
+      - name: Download All Result Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: temp-results/
+          pattern: result-chunks/chunk_*.txt
+          merge-multiple: true
+
+      - name: Aggregate All Results into a Single File
+        id: aggregate
+        run: |
+          echo "Aggregating all results..."
+          # Combine all downloaded result files into one.
+          # The `sort -u` command will also remove any duplicate findings.
+          cat temp-results/* | sort -u > nuclei-final-results.txt
+          echo "Final aggregated results created at nuclei-final-results.txt"
+          echo "Total unique findings: $(wc -l < nuclei-final-results.txt)"
+
+      - name: Upload Final Aggregated Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-nuclei-results
+          path: nuclei-final-results.txt
+          retention-days: 1
