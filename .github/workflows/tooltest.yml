@@ -19,14 +19,9 @@ jobs:
       - name: Create Chunks and Matrix
         id: create_chunks
         run: |
-          
-
-          
-          # This workflow will look for a file named "target.txt" in your repo.
-          
+          # --- CONFIGURATION ---
           INPUT_FILE="target.txt" 
-          CHUNK_SIZE=50
-          
+          CHUNK_SIZE=100
           # ---------------------
 
           CHUNK_DIR="chunks"
@@ -37,23 +32,29 @@ jobs:
           fi
 
           mkdir -p "$CHUNK_DIR"
-          # Split the input file into smaller chunks
           split -l "$CHUNK_SIZE" --numeric-suffixes=1 --additional-suffix=.txt "$INPUT_FILE" "$CHUNK_DIR/chunk_"
 
           echo "Created the following chunks:"
           ls -1 "$CHUNK_DIR"
 
-          # Create a JSON matrix of all the chunk file paths for the next job
+          # --- CORRECTED PART ---
+          # This robustly creates a valid JSON array of the chunk file paths.
           CHUNK_FILES=("$CHUNK_DIR"/chunk_*.txt)
-          if [ ${#CHUNK_FILES[@]} -eq 0 ]; then
+          if [ -e "${CHUNK_FILES[0]}" ]; then # Check if at least one chunk file exists
+            # Use jq to safely create the JSON array.
+            # -R reads raw strings, -s slurps them into an array.
+            MATRIX=$(printf "%s\n" "${CHUNK_FILES[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')
+            echo "matrix=${MATRIX}" >> $GITHUB_OUTPUT
+            echo "chunk_count=${#CHUNK_FILES[@]}" >> $GITHUB_OUTPUT
+            echo "Generated Matrix: ${MATRIX}"
+          else
             echo "::warning::No chunks were created from the input file."
             echo "matrix=[]" >> $GITHUB_OUTPUT
             echo "chunk_count=0" >> $GITHUB_OUTPUT
-          else
-            MATRIX=$(jq -R -s 'split("\n") | map(select(length > 0))' < <(printf "%s\n" "${CHUNK_FILES[@]}"))
-            echo "matrix=${MATRIX}" >> $GITHUB_OUTPUT
-            echo "chunk_count=${#CHUNK_FILES[@]}" >> $GITHUB_OUTPUT
           fi
+          # ----------------------
+
+
 
       - name: Upload Chunks as Artifact
         uses: actions/upload-artifact@v4
