@@ -7,20 +7,24 @@ permissions:
   contents: write # We only need to read the repository contents
 
 jobs:
-  prepare-chunks:
+prepare-chunks:
+    name: Prepare Chunks and Build Matrix
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.create_chunks.outputs.matrix }}
-      chunk_count: ${{ steps.create_chunks.outputs.chunk_count }}
+      matrix: ${{ steps.build_matrix.outputs.matrix }}
+      chunk_count: ${{ steps.build_matrix.outputs.chunk_count }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Create Chunks and Matrix
-        id: create_chunks
+      - name: Create Chunks and Build Matrix
+        id: build_matrix
+        shell: bash
         run: |
           # --- CONFIGURATION ---
+          # This workflow will look for a file named "target.txt" in your repo.
           INPUT_FILE="target.txt" 
+          # The number of lines from your input file to include in each parallel job.
           CHUNK_SIZE=100
           # ---------------------
 
@@ -32,27 +36,38 @@ jobs:
           fi
 
           mkdir -p "$CHUNK_DIR"
-          split -l "$CHUNK_SIZE" --numeric-suffixes=1 --additional-suffix=.txt "$INPUT_FILE" "$CHUNK_DIR/chunk_"
-
-          echo "Created the following chunks:"
+          echo "-> Splitting '$INPUT_FILE' into chunks of $CHUNK_SIZE lines..."
+          split -l "$CHUNK_SIZE" -a 3 --numeric-suffixes=1 "$INPUT_FILE" "$CHUNK_DIR/chunk_"
+          
+          echo "-> Created the following chunks:"
           ls -1 "$CHUNK_DIR"
 
-          # --- CORRECTED PART ---
-          # This robustly creates a valid JSON array of the chunk file paths.
-          CHUNK_FILES=("$CHUNK_DIR"/chunk_*.txt)
-          if [ -e "${CHUNK_FILES[0]}" ]; then # Check if at least one chunk file exists
-            # Use jq to safely create the JSON array.
-            # -R reads raw strings, -s slurps them into an array.
-            MATRIX=$(printf "%s\n" "${CHUNK_FILES[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')
-            echo "matrix=${MATRIX}" >> $GITHUB_OUTPUT
-            echo "chunk_count=${#CHUNK_FILES[@]}" >> $GITHUB_OUTPUT
-            echo "Generated Matrix: ${MATRIX}"
+          # --- APPLYING THE SUCCESSFUL PATTERN ---
+          # This is the robust, iterative method for building the JSON matrix.
+          echo "-> Building job matrix..."
+          JSON_MATRIX='[]'
+          CHUNK_COUNT=0
+          
+          # This loop safely iterates through each chunk file found.
+          # The -print0 and -d $'\0' handles filenames with spaces or special characters.
+          while IFS= read -r -d $'\0' chunk_file; do
+            # jq safely adds a new JSON object for the current file to the JSON_MATRIX variable.
+            # The object will look like: {"chunk_file":"chunks/chunk_001"}
+            JSON_MATRIX=$(printf '%s' "$JSON_MATRIX" | jq -c --arg file_path "$chunk_file" '. + [{chunk_file:$file_path}]')
+            # Increment the counter for each chunk found.
+            ((CHUNK_COUNT++))
+          done < <(find "$CHUNK_DIR" -maxdepth 1 -type f -name "chunk_*" -print0)
+
+          if [ "$CHUNK_COUNT" -eq 0 ]; then
+            echo "::warning::No chunk files were found to create a matrix."
           else
-            echo "::warning::No chunks were created from the input file."
-            echo "matrix=[]" >> $GITHUB_OUTPUT
-            echo "chunk_count=0" >> $GITHUB_OUTPUT
+            echo "-> Matrix creation complete. $CHUNK_COUNT jobs will be created."
           fi
-          # ----------------------
+
+          # Output the final, perfectly formatted JSON string and the count for the next jobs.
+          echo "Final Matrix: $JSON_MATRIX"
+          echo "matrix=$JSON_MATRIX" >> "$GITHUB_OUTPUT"
+          echo "chunk_count=$CHUNK_COUNT" >> "$GITHUB_OUTPUT"
 
 
 
@@ -63,7 +78,7 @@ jobs:
           path: chunks/
           retention-days: 1
 
-  run-nuclei-in-parallel:
+run-nuclei-in-parallel:
     needs: prepare-chunks
     if: ${{ needs.prepare-chunks.outputs.chunk_count > 0 }}
     runs-on: ubuntu-latest
@@ -111,7 +126,7 @@ jobs:
           name: nuclei-chunks
           path: chunks/
 
-      - name: Run Nuclei on Chunk
+      - name: Run Nhttpx on Chunk
         id: run_tool
         run: |
           CHUNK_BASENAME=$(basename "${{ matrix.chunk_file }}")
