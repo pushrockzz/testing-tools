@@ -77,11 +77,11 @@ jobs:
       - name: Upload Chunks as Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nuclei-chunks
+          name: output-chunks
           path: chunks/
           retention-days: 1
 
-  run-nuclei-in-parallel:
+  run-tools-in-parallel:
     needs: prepare-chunks
     if: ${{ needs.prepare-chunks.outputs.chunk_count > 0 }}
     runs-on: ubuntu-latest
@@ -126,26 +126,46 @@ jobs:
       - name: Download Chunks Artifact
         uses: actions/download-artifact@v4
         with:
-          name: nuclei-chunks
+          name: output-chunks
           path: chunks/
 
-      - name: Run Nhttpx on Chunk
-        id: run_tool
+      - name: Debug Matrix Context
         run: |
-          CHUNK_BASENAME=$(basename "${{ matrix.chunk_file }}")
+          echo "Matrix context for this job:"
+          echo "${{ toJson(matrix) }}"
+
+      # --- CORRECTED RUN STEP ---
+      - name: Run Nuclei on Chunk
+        id: run_tool
+        # This 'env' block safely passes the chunk_file path to an environment variable.
+        env:
+          CHUNK_PATH: ${{ matrix.chunk_file }}
+        run: |
+          # Exit on error, print commands
+          set -ex
+
+          # Verify that the environment variable was passed correctly
+          if [[ -z "$CHUNK_PATH" ]]; then
+            echo "::error:: CHUNK_PATH environment variable was not set correctly!"
+            exit 1
+          fi
+
+          # Verify the chunk file actually exists after artifact download
+          if [ ! -f "$CHUNK_PATH" ]; then
+            echo "::error:: Chunk file '$CHUNK_PATH' does not exist after download."
+            ls -R . # List all downloaded files for debugging
+            exit 1
+          fi
+
+          # Now, use the reliable environment variable instead of direct context.
+          CHUNK_BASENAME=$(basename "$CHUNK_PATH")
           OUTPUT_DIR="results"
           OUTPUT_FILE="$OUTPUT_DIR/result_$CHUNK_BASENAME"
           mkdir -p "$OUTPUT_DIR"
 
-          echo "Running Nuclei on file: ${{ matrix.chunk_file }}"
-          
-          # --- MANUALLY CONFIGURED COMMAND ---
-          # This is where you write the exact command you want to run.
-          # `${{ matrix.chunk_file }}` is the placeholder for the input list.
-          # `$OUTPUT_FILE` is the placeholder for the output file for this specific chunk.
-
-          
-          httpx  -l "${{ matrix.chunk_file }}" -t 100 -o "$OUTPUT_FILE" -rl 100 -random-agent -delay 200ms -silent 
+          echo "Running httpx on file: $CHUNK_PATH"
+         
+          httpx  -l "$CHUNK_PATH"" -t 100 -o "$OUTPUT_FILE" -rl 100 -random-agent -delay 200ms -silent 
           
           
           # ------------------------------------
