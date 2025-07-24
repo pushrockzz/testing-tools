@@ -60,8 +60,8 @@ jobs:
           # This is the most robust way: list files, pipe to jq to build the JSON.
           # The jq command transforms each line of input into a JSON object.
           # The -R (raw input) and -s (slurp) flags read the entire input into a single array.
-          JSON_MATRIX=$(find "$CHUNK_DIR" -type f -name 'chunk_*' | jq -R -s -c 'split("\n") | map(select(length > 0)) | map({chunk_file: .})')
-
+          
+          JSON_MATRIX=$(find "$CHUNK_DIR" -type f -name 'chunk_*' | jq -R -s -c 'split("\n") | map(select(length > 0))')
           # --- 4. VERIFY AND OUTPUT ---
           echo "-> Verifying that the generated matrix is valid JSON..."
           echo "$JSON_MATRIX" | jq .
@@ -71,7 +71,6 @@ jobs:
           
           echo "matrix=$JSON_MATRIX" >> "$GITHUB_OUTPUT"
           echo "chunk_count=$CHUNK_COUNT" >> "$GITHUB_OUTPUT"
-
 
 
       - name: Upload Chunks as Artifact
@@ -128,45 +127,42 @@ jobs:
         with:
           name: output-chunks
           path: chunks/
-
       - name: Debug Matrix Context
         run: |
-          echo "Matrix context for this job:"
-          echo "${{ toJson(matrix) }}"
+          echo "matrix.chunk_file = ${{ matrix.chunk_file }}"
 
-      # --- CORRECTED RUN STEP ---
       - name: Run tools on Chunks
         id: run_tool
-        # This 'env' block safely passes the chunk_file path to an environment variable.
+        shell: bash
         env:
           CHUNK_PATH: ${{ matrix.chunk_file }}
         run: |
-          # Exit on error, print commands
           set -ex
 
-          # Verify that the environment variable was passed correctly
-          if [[ -z "$CHUNK_PATH" ]]; then
-            echo "::error:: CHUNK_PATH environment variable was not set correctly!"
-            
-          fi
-
-          # Verify the chunk file actually exists after artifact download
+          # verify chunk file exists
           if [ ! -f "$CHUNK_PATH" ]; then
-            echo "::error:: Chunk file '$CHUNK_PATH' does not exist after download."
-            ls -R . # List all downloaded files for debugging
-            
+            echo "::error:: Chunk file '$CHUNK_PATH' not found"
+            ls -R .
+            exit 1
           fi
 
-          # Now, use the reliable environment variable instead of direct context.
-          CHUNK_BASENAME=$(basename "$CHUNK_PATH")
+          # derive basename for artifact naming
+          BASENAME=$(basename "$CHUNK_PATH")
+          echo "basename=$BASENAME" >> $GITHUB_OUTPUT
+
           OUTPUT_DIR="results"
-          OUTPUT_FILE="$OUTPUT_DIR/result_$CHUNK_BASENAME"
           mkdir -p "$OUTPUT_DIR"
 
-          echo "Running httpx on file: $CHUNK_PATH"
-         
-          httpx  -l "$CHUNK_PATH"" -t 100 -o "$OUTPUT_FILE" -rl 100 -random-agent -delay 200ms -silent 
-          
+          OUTPUT_FILE="$OUTPUT_DIR/result_${BASENAME}"
+          echo "Running httpx on $CHUNK_PATH → $OUTPUT_FILE"
+
+          # fixed spacing between flags
+          httpx -l "$CHUNK_PATH" -t 100 \
+                -o "$OUTPUT_FILE" \
+                -rl 100 \
+                -random-agent \
+                -delay 200ms \
+                -silent                  
           
           # ------------------------------------
 
