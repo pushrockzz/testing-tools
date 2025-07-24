@@ -168,12 +168,18 @@ jobs:
 
           echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
 
+      - name: Compute Safe Chunk Name
+        id: safe_chunk
+        run: |
+          SAFE_CHUNK="$(echo "${{ matrix.chunk_file }}" | tr '/' '_')"
+          echo "safe_chunk=$SAFE_CHUNK" >> $GITHUB_OUTPUT
+
       - name: Upload Individual Result Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: result-${{ matrix.chunk_file }}
+          name: result-${{ steps.safe_chunk.outputs.safe_chunk }}
           path: ${{ steps.run_tool.outputs.output_file }}
-          retention-days: 1 
+          retention-days: 1
 
   aggregate-results:
     needs: run-tools-in-parallel
