@@ -135,7 +135,7 @@ jobs:
           echo "${{ toJson(matrix) }}"
 
       # --- CORRECTED RUN STEP ---
-      - name: Run Nuclei on Chunk
+      - name: Run tools on Chunks
         id: run_tool
         # This 'env' block safely passes the chunk_file path to an environment variable.
         env:
@@ -180,7 +180,7 @@ jobs:
           retention-days: 1 
 
   aggregate-results:
-    needs: run-nuclei-in-parallel
+    needs: run-tools-in-parallel
     if: always() # This ensures the aggregation job runs even if some nuclei jobs fail
     runs-on: ubuntu-latest
     steps:
