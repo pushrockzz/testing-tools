@@ -22,9 +22,9 @@ jobs:
           
 
           
-          # This workflow will look for a file named "targets.txt" in your repo.
+          # This workflow will look for a file named "target.txt" in your repo.
           
-          INPUT_FILE="targets.txt" 
+          INPUT_FILE="target.txt" 
           CHUNK_SIZE=50
           
           # ---------------------
