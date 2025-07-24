@@ -17,21 +17,19 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-       # This step ensures that jq is available before the next step tries to use it.
       - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq       
+        run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Create Chunks and Build Matrix
         id: build_matrix
         shell: bash
         run: |
-          # --- CONFIGURATION ---
-          # This workflow will look for a file named "target.txt" in your repo.
-          INPUT_FILE="target.txt" 
-          # The number of lines from your input file to include in each parallel job.
-          CHUNK_SIZE=100
-          # ---------------------
+          # Exit on any error, print all commands to the log for debugging
+          set -ex
 
+          # --- 1. CONFIGURATION AND SETUP ---
+          INPUT_FILE="target.txt"
+          CHUNK_SIZE=100
           CHUNK_DIR="chunks"
 
           if [ ! -f "$INPUT_FILE" ]; then
@@ -43,33 +41,34 @@ jobs:
           echo "-> Splitting '$INPUT_FILE' into chunks of $CHUNK_SIZE lines..."
           split -l "$CHUNK_SIZE" -a 3 --numeric-suffixes=1 "$INPUT_FILE" "$CHUNK_DIR/chunk_"
           
-          echo "-> Created the following chunks:"
-          ls -1 "$CHUNK_DIR"
+          echo "-> Chunk files created in '$CHUNK_DIR' directory:"
+          ls -l "$CHUNK_DIR"
 
-          # --- APPLYING THE SUCCESSFUL PATTERN ---
-          # This is the robust, iterative method for building the JSON matrix.
-          echo "-> Building job matrix..."
-          JSON_MATRIX='[]'
-          CHUNK_COUNT=0
-          
-          # This loop safely iterates through each chunk file found.
-          # The -print0 and -d $'\0' handles filenames with spaces or special characters.
-          while IFS= read -r -d $'\0' chunk_file; do
-            # jq safely adds a new JSON object for the current file to the JSON_MATRIX variable.
-            # The object will look like: {"chunk_file":"chunks/chunk_001"}
-            JSON_MATRIX=$(printf '%s' "$JSON_MATRIX" | jq -c --arg file_path "$chunk_file" '. + [{chunk_file:$file_path}]')
-            # Increment the counter for each chunk found.
-            ((CHUNK_COUNT++))
-          done < <(find "$CHUNK_DIR" -maxdepth 1 -type f -name "chunk_*" -print0)
+          # --- 2. COUNT THE CHUNKS ---
+          # A simple and reliable way to count the files.
+          CHUNK_COUNT=$(find "$CHUNK_DIR" -type f -name 'chunk_*' | wc -l)
 
           if [ "$CHUNK_COUNT" -eq 0 ]; then
-            echo "::warning::No chunk files were found to create a matrix."
-          else
-            echo "-> Matrix creation complete. $CHUNK_COUNT jobs will be created."
+            echo "::warning::Splitting produced 0 chunk files. No work to do."
+            echo "matrix=[]" >> "$GITHUB_OUTPUT"
+            echo "chunk_count=0" >> "$GITHUB_OUTPUT"
+            exit 0 # Exit successfully as there is no work
           fi
+          echo "-> Found $CHUNK_COUNT chunk files to process."
 
-          # Output the final, perfectly formatted JSON string and the count for the next jobs.
+          # --- 3. BUILD THE MATRIX (SIMPLIFIED & DIRECT METHOD) ---
+          # This is the most robust way: list files, pipe to jq to build the JSON.
+          # The jq command transforms each line of input into a JSON object.
+          # The -R (raw input) and -s (slurp) flags read the entire input into a single array.
+          JSON_MATRIX=$(find "$CHUNK_DIR" -type f -name 'chunk_*' | jq -R -s -c 'split("\n") | map(select(length > 0)) | map({chunk_file: .})')
+
+          # --- 4. VERIFY AND OUTPUT ---
+          echo "-> Verifying that the generated matrix is valid JSON..."
+          echo "$JSON_MATRIX" | jq .
+          
+          echo "-> Matrix verification successful."
           echo "Final Matrix: $JSON_MATRIX"
+          
           echo "matrix=$JSON_MATRIX" >> "$GITHUB_OUTPUT"
           echo "chunk_count=$CHUNK_COUNT" >> "$GITHUB_OUTPUT"
 
