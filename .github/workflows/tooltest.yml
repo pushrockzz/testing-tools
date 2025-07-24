@@ -183,7 +183,7 @@ jobs:
 
   aggregate-results:
     needs: run-tools-in-parallel
-    if: always() # This ensures the aggregation job runs even if some nuclei jobs fail
+    if: always() # run even if some jobs fail
     runs-on: ubuntu-latest
     steps:
       - name: Create Temporary Directory for Results
@@ -193,15 +193,19 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: temp-results/
-          pattern: result-chunks/chunk_*.txt
+          # ← match your sanitized names: "chunks/chunk_009" → "chunks_chunk_009"
+          pattern: 'result-chunks_chunk_*'
           merge-multiple: true
+
+      - name: List Downloaded Files
+        run: |
+          echo "Files in temp-results/:"
+          ls -al temp-results/
 
       - name: Aggregate All Results into a Single File
         id: aggregate
         run: |
           echo "Aggregating all results..."
-          # Combine all downloaded result files into one.
-          # The `sort -u` command will also remove any duplicate findings.
           cat temp-results/* | sort -u > nuclei-final-results.txt
           echo "Final aggregated results created at nuclei-final-results.txt"
           echo "Total unique findings: $(wc -l < nuclei-final-results.txt)"
