@@ -7,7 +7,7 @@ permissions:
   contents: write # We only need to read the repository contents
 
 jobs:
-prepare-chunks:
+  prepare-chunks:
     name: Prepare Chunks and Build Matrix
     runs-on: ubuntu-latest
     outputs:
@@ -78,7 +78,7 @@ prepare-chunks:
           path: chunks/
           retention-days: 1
 
-run-nuclei-in-parallel:
+  run-nuclei-in-parallel:
     needs: prepare-chunks
     if: ${{ needs.prepare-chunks.outputs.chunk_count > 0 }}
     runs-on: ubuntu-latest
