@@ -84,6 +84,10 @@ jobs:
     needs: prepare-chunks
     if: ${{ needs.prepare-chunks.outputs.chunk_count > 0 }}
     runs-on: ubuntu-latest
+    env:
+      # Make this available to all steps
+      CHROME_PATH: /usr/bin/google-chrome-stable    
+      CHUNK_PATH: ${{ matrix.chunk_file }}
     strategy:
       fail-fast: false
       matrix:
@@ -112,38 +116,45 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-cache-
 
-      - name: Install Tools
+      - name: Setup Google Chrome
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          chrome-version: stable
+          install-dependencies: true
+
+      - name: Verify Chrome path
         run: |
-          # Installing httpx
-          if ! command -v httpx >/dev/null; then
-            echo "Installing httpx…"
-            go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          else
-            echo "httpx already in cache"
-          fi    
+          echo "→ Chrome binary: ${{ steps.setup-chrome.outputs.chrome-path }}"
+          ${{ steps.setup-chrome.outputs.chrome-path }} --version
+
+      - name: Install GoWitness
+        run: |
+          # if you don't have gowitness already:
+          GO111MODULE=on go install github.com/sensepost/gowitness@latest
+          # ensure $GOPATH/bin is on PATH
+          echo "${{ runner.tool_cache }}/go/bin" >> $GITHUB_PATH
 
       - name: Download Chunks Artifact
         uses: actions/download-artifact@v4
         with:
           name: output-chunks
           path: chunks/
+     
       - name: Debug Matrix Context
         run: |
           echo "matrix.chunk_file = ${{ matrix.chunk_file }}"
 
-      - name: Run tools on Chunks
+      - name: Run GoWitness screenshots
         id: run_tool
         shell: bash
-        env:
-          CHUNK_PATH: ${{ matrix.chunk_file }}
         run: |
-          set -ex
 
           # verify chunk file exists
           if [ ! -f "$CHUNK_PATH" ]; then
             echo "::error:: Chunk file '$CHUNK_PATH' not found"
             ls -R .
-            exit 1
+            exit 0
           fi
 
           # derive basename for artifact naming
@@ -155,19 +166,17 @@ jobs:
 
           OUTPUT_FILE="$OUTPUT_DIR/result_${BASENAME}"
           echo "Running httpx on $CHUNK_PATH → $OUTPUT_FILE"
-
-          # fixed spacing between flags
-          httpx -l "$CHUNK_PATH" -t 100 \
-                -o "$OUTPUT_FILE" \
-                -rl 100 \
-                -random-agent \
-                -delay 200ms \
-                -silent                  
           
-          # ------------------------------------
-
+          gowitness file \
+            -f "$CHUNK_PATH" \
+            --threads 8 \
+            --timeout 10 \
+            --chrome-path "${{ steps.setup-chrome.outputs.chrome-path }}" \
+            --screenshot-path "$OUTPUT_FILE" \
+            --db-path "$OUTPUT_FILE"/gowitness.sqlite3
+          
           echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
-
+          
       - name: Compute Safe Chunk Name
         id: safe_chunk
         run: |
@@ -180,7 +189,8 @@ jobs:
           name: result-${{ steps.safe_chunk.outputs.safe_chunk }}
           path: ${{ steps.run_tool.outputs.output_file }}
           retention-days: 1
-
+       
+   
   aggregate-results:
     needs: run-tools-in-parallel
     if: always() # run even if some jobs fail
