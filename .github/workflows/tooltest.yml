@@ -161,18 +161,22 @@ jobs:
           BASENAME=$(basename "$CHUNK_PATH")
           echo "basename=$BASENAME" >> $GITHUB_OUTPUT
 
-          OUTPUT_DIR="results"
+          OUTPUT_DIR="screenshots"
           mkdir -p "$OUTPUT_DIR"
 
           OUTPUT_FILE="$OUTPUT_DIR/result_${BASENAME}"
           echo "Running httpx on $CHUNK_PATH → $OUTPUT_FILE"
           
-          gowitness file \
+          gowitness scan file \
             -f "$CHUNK_PATH" \
-            --threads 8 \
-            --timeout 10 \
+            --threads 10 \
+            --delay 1
+            --timeout 60 \
             --chrome-path "${{ steps.setup-chrome.outputs.chrome-path }}" \
+            --screenshot-fullpage
             --screenshot-path "$OUTPUT_FILE" \
+            --write-jsonl \
+            
             --db-path "$OUTPUT_FILE"/gowitness.sqlite3
           
           echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
