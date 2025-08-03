@@ -167,16 +167,15 @@ jobs:
           OUTPUT_FILE="$OUTPUT_DIR/result_${BASENAME}"
           echo "Running httpx on $CHUNK_PATH → $OUTPUT_FILE"
           
-          gowitness scan file \
-            -f "$CHUNK_PATH" \
+          gowitness scan file -f "$CHUNK_PATH" \
             --threads 10 \
             --delay 1 \
             --timeout 40 \
             --chrome-path "${{ steps.setup-chrome.outputs.chrome-path }}" \
-            --skip-html \
             --screenshot-fullpage \
             --screenshot-path "$OUTPUT_FILE" \
-            --write-jsonl 
+            --write-jsonl \
+            --debug-log
                                 
           echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
           
