@@ -149,7 +149,7 @@ jobs:
         id: run_tool
         shell: bash
         run: |
-
+          set -ex
           # verify chunk file exists
           if [ ! -f "$CHUNK_PATH" ]; then
             echo "::error:: Chunk file '$CHUNK_PATH' not found"
