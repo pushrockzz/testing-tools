@@ -170,16 +170,14 @@ jobs:
           gowitness scan file \
             -f "$CHUNK_PATH" \
             --threads 10 \
-            --delay 1
+            --delay 1 \
             --timeout 40 \
             --chrome-path "${{ steps.setup-chrome.outputs.chrome-path }}" \
             --skip-html \
-            --screenshot-fullpage
+            --screenshot-fullpage \
             --screenshot-path "$OUTPUT_FILE" \
-            --write-jsonl \
-            
-            --db-path "$OUTPUT_FILE"/gowitness.sqlite3
-          
+            --write-jsonl 
+                                
           echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
           
       - name: Compute Safe Chunk Name
