@@ -160,11 +160,16 @@ jobs:
           # derive basename for artifact naming
           BASENAME=$(basename "$CHUNK_PATH")
           echo "basename=$BASENAME" >> $GITHUB_OUTPUT
-
+         
+                       
           OUTPUT_DIR="screenshots"
-          mkdir -p "$OUTPUT_DIR"
 
+          mkdir -p "$OUTPUT_DIR"
+          
           OUTPUT_FILE="$OUTPUT_DIR/result_${BASENAME}"
+
+          mkdir -p "$OUTPUT_FILE"
+          
           echo "Running httpx on $CHUNK_PATH → $OUTPUT_FILE"
           
           gowitness scan file -f "$CHUNK_PATH" \
@@ -176,13 +181,14 @@ jobs:
             --screenshot-path "$OUTPUT_FILE" \
             --write-jsonl \
             --debug-log
-                                
+
+          echo "basename=$BASENAME" >> $GITHUB_OUTPUT                      
           echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
           
       - name: Compute Safe Chunk Name
         id: safe_chunk
         run: |
-          SAFE_CHUNK="$(echo "${{ matrix.chunk_file }}" | tr '/' '_')"
+          SAFE_CHUNK="$(echo "${{ steps.run_tool.outputs.basename }}""
           echo "safe_chunk=$SAFE_CHUNK" >> $GITHUB_OUTPUT
 
       - name: Upload Individual Result Artifact
