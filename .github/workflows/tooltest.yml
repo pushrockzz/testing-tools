@@ -188,7 +188,7 @@ jobs:
       - name: Compute Safe Chunk Name
         id: safe_chunk
         run: |
-          SAFE_CHUNK="$(echo "${{ steps.run_tool.outputs.basename }}""
+          SAFE_CHUNK="$(echo "${{ steps.run_tool.outputs.basename }}" )"
           echo "safe_chunk=$SAFE_CHUNK" >> $GITHUB_OUTPUT
 
       - name: Upload Individual Result Artifact
