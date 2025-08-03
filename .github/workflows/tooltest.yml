@@ -181,8 +181,10 @@ jobs:
             --screenshot-path "$OUTPUT_FILE" \
             --write-jsonl \
             --debug-log
-
-          echo "basename=$BASENAME" >> $GITHUB_OUTPUT                      
+       
+          echo "basename=$BASENAME" >> $GITHUB_OUTPUT 
+          ls -lr "$OUTPUT_FILE"
+          
           echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
           
       - name: Compute Safe Chunk Name
