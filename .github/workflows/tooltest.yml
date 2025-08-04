@@ -116,17 +116,26 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-cache-
 
-      - name: Setup Google Chrome
-        id: setup-chrome
-        uses: browser-actions/setup-chrome@v2
-        with:
-          chrome-version: stable
-          install-dependencies: true
-
-      - name: Verify Chrome path
+      - name: Download and Install Google Chrome from .deb file
         run: |
-          echo "→ Chrome binary: ${{ steps.setup-chrome.outputs.chrome-path }}"
-          ${{ steps.setup-chrome.outputs.chrome-path }} --version
+          set -ex
+          CHROME_DEB_URL="http://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_138.0.7204.183-1_amd64.deb"
+          CHROME_DEB_FILE="google-chrome.deb"
+
+          echo "--- Downloading Chrome package ---"
+          wget -O "$CHROME_DEB_FILE" "$CHROME_DEB_URL"
+
+          echo "--- Installing Chrome package and dependencies ---"
+          # Using "apt-get install -y ./" is the modern way to install a local .deb
+          # file because it automatically handles and installs missing dependencies.
+          sudo apt-get update
+          sudo apt-get install -y ./"$CHROME_DEB_FILE"
+          
+          echo "--- Verifying installation ---"
+          # dpkg places the binary in /usr/bin/google-chrome-stable
+          ls -l /usr/bin/google-chrome-stable
+          /usr/bin/google-chrome-stable --version
+
 
       - name: Install GoWitness
         run: |
@@ -176,7 +185,7 @@ jobs:
             --threads 10 \
             --delay 1 \
             --timeout 40 \
-            --chrome-path "${{ steps.setup-chrome.outputs.chrome-path }}" \
+            --chrome-path "/usr/bin/google-chrome-stable" \
             --screenshot-fullpage \
             --screenshot-path "$OUTPUT_FILE" \
             --write-jsonl \
