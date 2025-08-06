@@ -26,28 +26,23 @@ jobs:
         run: |
           # Exit on any error, print all commands to the log for debugging
           set -ex
-
           # --- 1. CONFIGURATION AND SETUP ---
           INPUT_FILE="target.txt"
           CHUNK_SIZE=100
           CHUNK_DIR="chunks"
-
           if [ ! -f "$INPUT_FILE" ]; then
             echo "::error::Input file '$INPUT_FILE' not found in the repository root."
             exit 1
           fi
-
           mkdir -p "$CHUNK_DIR"
           echo "-> Splitting '$INPUT_FILE' into chunks of $CHUNK_SIZE lines..."
           split -l "$CHUNK_SIZE" -a 3 --numeric-suffixes=1 "$INPUT_FILE" "$CHUNK_DIR/chunk_"
           
           echo "-> Chunk files created in '$CHUNK_DIR' directory:"
           ls -l "$CHUNK_DIR"
-
           # --- 2. COUNT THE CHUNKS ---
           # A simple and reliable way to count the files.
           CHUNK_COUNT=$(find "$CHUNK_DIR" -type f -name 'chunk_*' | wc -l)
-
           if [ "$CHUNK_COUNT" -eq 0 ]; then
             echo "::warning::Splitting produced 0 chunk files. No work to do."
             echo "matrix=[]" >> "$GITHUB_OUTPUT"
@@ -55,7 +50,6 @@ jobs:
             exit 0 # Exit successfully as there is no work
           fi
           echo "-> Found $CHUNK_COUNT chunk files to process."
-
           # --- 3. BUILD THE MATRIX (SIMPLIFIED & DIRECT METHOD) ---
           # This is the most robust way: list files, pipe to jq to build the JSON.
           # The jq command transforms each line of input into a JSON object.
@@ -71,8 +65,6 @@ jobs:
           
           echo "matrix=$JSON_MATRIX" >> "$GITHUB_OUTPUT"
           echo "chunk_count=$CHUNK_COUNT" >> "$GITHUB_OUTPUT"
-
-
       - name: Upload Chunks as Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -84,10 +76,6 @@ jobs:
     needs: prepare-chunks
     if: ${{ needs.prepare-chunks.outputs.chunk_count > 0 }}
     runs-on: ubuntu-latest
-    env:
-      # Make this available to all steps
-      CHROME_PATH: /usr/bin/google-chrome-stable    
-      CHUNK_PATH: ${{ matrix.chunk_file }}
     strategy:
       fail-fast: false
       matrix:
@@ -115,104 +103,68 @@ jobs:
           key: ${{ runner.os }}-go-cache-${{ github.ref_name }}
           restore-keys: |
             ${{ runner.os }}-go-cache-
-
-      - name: Download and Install Google Chrome from .deb file
+      - name: Install Tools
         run: |
-          set -ex
-          CHROME_DEB_URL="http://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_138.0.7204.183-1_amd64.deb"
-          CHROME_DEB_FILE="google-chrome.deb"
-
-          echo "--- Downloading Chrome package ---"
-          wget -O "$CHROME_DEB_FILE" "$CHROME_DEB_URL"
-
-          echo "--- Installing Chrome package and dependencies ---"
-          # Using "apt-get install -y ./" is the modern way to install a local .deb
-          # file because it automatically handles and installs missing dependencies.
-          sudo apt-get update
-          sudo apt-get install -y ./"$CHROME_DEB_FILE"
-          
-          echo "--- Verifying installation ---"
-          # dpkg places the binary in /usr/bin/google-chrome-stable
-          ls -l /usr/bin/google-chrome-stable
-          /usr/bin/google-chrome-stable --version
-
-
-      - name: Install GoWitness
-        run: |
-          # if you don't have gowitness already:
-          GO111MODULE=on go install github.com/sensepost/gowitness@latest
-          # ensure $GOPATH/bin is on PATH
-          echo "${{ runner.tool_cache }}/go/bin" >> $GITHUB_PATH
-
+          # Installing httpx
+          if ! command -v httpx >/dev/null; then
+            echo "Installing httpx…"
+            go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          else
+            echo "httpx already in cache"
+          fi    
       - name: Download Chunks Artifact
         uses: actions/download-artifact@v4
         with:
           name: output-chunks
           path: chunks/
-     
       - name: Debug Matrix Context
         run: |
           echo "matrix.chunk_file = ${{ matrix.chunk_file }}"
-
-      - name: Run GoWitness screenshots
+      - name: Run tools on Chunks
         id: run_tool
         shell: bash
+        env:
+          CHUNK_PATH: ${{ matrix.chunk_file }}
         run: |
           set -ex
           # verify chunk file exists
           if [ ! -f "$CHUNK_PATH" ]; then
             echo "::error:: Chunk file '$CHUNK_PATH' not found"
             ls -R .
-            exit 0
+            exit 1
           fi
-
           # derive basename for artifact naming
           BASENAME=$(basename "$CHUNK_PATH")
           echo "basename=$BASENAME" >> $GITHUB_OUTPUT
-         
-                       
-          OUTPUT_DIR="screenshots"
-
+          OUTPUT_DIR="results"
           mkdir -p "$OUTPUT_DIR"
-          
           OUTPUT_FILE="$OUTPUT_DIR/result_${BASENAME}"
-
-          mkdir -p "$OUTPUT_FILE"
-          
           echo "Running httpx on $CHUNK_PATH → $OUTPUT_FILE"
-          
-          gowitness scan file -f "$CHUNK_PATH" \
-            --threads 10 \
-            --delay 1 \
-            --timeout 40 \
-            --chrome-path "/usr/bin/google-chrome-stable" \
-            --screenshot-fullpage \
-            --screenshot-path "$OUTPUT_FILE" \
-            --write-jsonl \
-            --debug-log
-       
-          echo "basename=$BASENAME" >> $GITHUB_OUTPUT 
-          ls -lr "$OUTPUT_FILE"
-          
+          PUBLIC_IP=$(curl -s https://api.ipify.org) && echo "The public IP of this runner is: $PUBLIC_IP"
+          # fixed spacing between flags
+          httpx -l "$CHUNK_PATH" -t 100 -sc \
+                -o "$OUTPUT_FILE" \
+                -rl 100 \
+                -random-agent \
+                -silent                  
+          # ------------------------------------
           echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
           
       - name: Compute Safe Chunk Name
         id: safe_chunk
         run: |
-          SAFE_CHUNK="$(echo "${{ steps.run_tool.outputs.basename }}" )"
+          SAFE_CHUNK="$(echo "${{ matrix.chunk_file }}" | tr '/' '_')"
           echo "safe_chunk=$SAFE_CHUNK" >> $GITHUB_OUTPUT
-
       - name: Upload Individual Result Artifact
         uses: actions/upload-artifact@v4
         with:
           name: result-${{ steps.safe_chunk.outputs.safe_chunk }}
           path: ${{ steps.run_tool.outputs.output_file }}
           retention-days: 1
-       
-   
+
   aggregate-results:
     needs: run-tools-in-parallel
-    if: always() # run even if some jobs fail
+    if: always() # This ensures the aggregation job runs even if some nuclei jobs fail
     runs-on: ubuntu-latest
     steps:
       - name: Create Temporary Directory for Results
@@ -222,23 +174,18 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: temp-results/
-          # ← match your sanitized names: "chunks/chunk_009" → "chunks_chunk_009"
-          pattern: 'result-chunks_chunk_*'
+          pattern: result-chunks/chunk_*.txt
           merge-multiple: true
-
-      - name: List Downloaded Files
-        run: |
-          echo "Files in temp-results/:"
-          ls -al temp-results/
 
       - name: Aggregate All Results into a Single File
         id: aggregate
         run: |
           echo "Aggregating all results..."
+          # Combine all downloaded result files into one.
+          # The `sort -u` command will also remove any duplicate findings.
           cat temp-results/* | sort -u > nuclei-final-results.txt
           echo "Final aggregated results created at nuclei-final-results.txt"
           echo "Total unique findings: $(wc -l < nuclei-final-results.txt)"
-
       - name: Upload Final Aggregated Results
         uses: actions/upload-artifact@v4
         with:
