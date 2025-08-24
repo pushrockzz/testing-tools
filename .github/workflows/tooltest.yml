@@ -142,9 +142,10 @@ jobs:
           echo "Running httpx on $CHUNK_PATH → $OUTPUT_FILE"
           PUBLIC_IP=$(curl -s https://api.ipify.org) && echo "The public IP of this runner is: $PUBLIC_IP"
           # fixed spacing between flags
-          httpx -l "$CHUNK_PATH" -t 100 -sc \
+          httpx -l "$CHUNK_PATH" -t 100 \
                 -o "$OUTPUT_FILE" \
                 -rl 100 \
+                -no-color \
                 -random-agent \
                 -silent                  
           # ------------------------------------
@@ -174,7 +175,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: temp-results/
-          pattern: result-chunks/chunk_*.txt
+          pattern: result-*
           merge-multiple: true
 
       - name: Aggregate All Results into a Single File
