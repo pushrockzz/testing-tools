@@ -24,15 +24,14 @@ jobs:
         id: build_matrix
         shell: bash
         run: |
-          # Exit on any error, print all commands to the log for debugging
-          set -ex
+
           # --- 1. CONFIGURATION AND SETUP ---
           INPUT_FILE="target.txt"
           CHUNK_SIZE=100
           CHUNK_DIR="chunks"
           if [ ! -f "$INPUT_FILE" ]; then
             echo "::error::Input file '$INPUT_FILE' not found in the repository root."
-            exit 1
+            exit 0
           fi
           mkdir -p "$CHUNK_DIR"
           echo "-> Splitting '$INPUT_FILE' into chunks of $CHUNK_SIZE lines..."
@@ -65,6 +64,7 @@ jobs:
           
           echo "matrix=$JSON_MATRIX" >> "$GITHUB_OUTPUT"
           echo "chunk_count=$CHUNK_COUNT" >> "$GITHUB_OUTPUT"
+          
       - name: Upload Chunks as Artifact
         uses: actions/upload-artifact@v4
         with:
