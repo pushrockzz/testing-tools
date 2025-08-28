@@ -25,7 +25,7 @@ jobs:
           if [ ! -f "$INPUT_FILE" ]; then
             echo "::error::Input file '$INPUT_FILE' not found!"
             echo "matrix=[]" >> $GITHUB_OUTPUT
-            exit 1
+            exit 0
           fi
 
           # 2. Get the total line count and apply splitting logic
@@ -120,7 +120,7 @@ jobs:
           # This path will now be correct because the download step recreated it.
           if [ ! -f "$CH" ]; then
             echo "::error::File not found at the expected path: $CH"
-            exit 1
+            exit 0
           fi
           
           OUT="results/httpx_out" # Simplified, common output directory
@@ -133,7 +133,7 @@ jobs:
             # small: single httpx run
             echo "— ≤1500 lines: single httpx with 100 threads"
             httpx -l "$CH" -silent -threads 100 \
-              -o "${OUT}/httpx_$(basename "$CH")"
+              -o "${OUT}/httpx_$(basename "$CH")" | nuclei -t ~/nuclei-templates/http/exposed-panels/globalprotect-panel.yaml -silent
           else
             # big: split into sub-chunks and run with GNU Parallel
             TMP=$(mktemp -d)
@@ -149,7 +149,7 @@ jobs:
             echo "— Launching parallel -j$JOBS with $THREADS threads"
             parallel -j"$JOBS" \
               httpx -l {} -silent -threads "$THREADS" -retries 1 -random-agent -timeout 10 \
-                    -o "$OUT/httpx_{/.}.txt" \
+                    -o "$OUT/httpx_{/.}.txt" |  nuclei -t ~/nuclei-templates/http/exposed-panels/globalprotect-panel.yaml -silent
               ::: "$TMP"/sub_*.txt
             rm -rf "$TMP"
           fi
