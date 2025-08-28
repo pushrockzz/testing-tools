@@ -15,10 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Build chunk matrix from targets.txt
+      - name: Build chunk matrix from target.txt
         id: set_matrix
         run: |
-          INPUT_FILE="targets.txt"
+          INPUT_FILE="target.txt"
           CHUNK_DIR="results/chunks"
 
           # 1. Check if the input file exists
