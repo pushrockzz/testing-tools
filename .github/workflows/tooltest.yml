@@ -1,195 +1,197 @@
-name: Testing tools against a file
-
 on:
-  workflow_dispatch: # Allows you to run this workflow manually
+  workflow_dispatch:
 
 permissions:
-  contents: write # We only need to read the repository contents
+  contents: write
+
+env:
+  MAX_PARALLEL: 20 # <— throttle HTTPX jobs
 
 jobs:
-  prepare-chunks:
-    name: Prepare Chunks and Build Matrix
+  prepare_matrix:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.build_matrix.outputs.matrix }}
-      chunk_count: ${{ steps.build_matrix.outputs.chunk_count }}
+      matrix: ${{ steps.set_matrix.outputs.matrix }}
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v3
 
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: Create Chunks and Build Matrix
-        id: build_matrix
-        shell: bash
+      - name: Build chunk matrix from targets.txt
+        id: set_matrix
         run: |
+          INPUT_FILE="targets.txt"
+          CHUNK_DIR="results/chunks"
 
-          # --- 1. CONFIGURATION AND SETUP ---
-          INPUT_FILE="target.txt"
-          CHUNK_SIZE=100
-          CHUNK_DIR="chunks"
+          # 1. Check if the input file exists
           if [ ! -f "$INPUT_FILE" ]; then
-            echo "::error::Input file '$INPUT_FILE' not found in the repository root."
-            exit 0
+            echo "::error::Input file '$INPUT_FILE' not found!"
+            echo "matrix=[]" >> $GITHUB_OUTPUT
+            exit 1
           fi
+
+          # 2. Get the total line count and apply splitting logic
+          LINES=$(wc -l < "$INPUT_FILE")
+          echo "Source $INPUT_FILE has $LINES lines"
           mkdir -p "$CHUNK_DIR"
-          echo "-> Splitting '$INPUT_FILE' into chunks of $CHUNK_SIZE lines..."
-          split -l "$CHUNK_SIZE" -a 3 --numeric-suffixes=1 "$INPUT_FILE" "$CHUNK_DIR/chunk_"
-          
-          echo "-> Chunk files created in '$CHUNK_DIR' directory:"
-          ls -l "$CHUNK_DIR"
-          # --- 2. COUNT THE CHUNKS ---
-          # A simple and reliable way to count the files.
-          CHUNK_COUNT=$(find "$CHUNK_DIR" -type f -name 'chunk_*' | wc -l)
-          if [ "$CHUNK_COUNT" -eq 0 ]; then
-            echo "::warning::Splitting produced 0 chunk files. No work to do."
-            echo "matrix=[]" >> "$GITHUB_OUTPUT"
-            echo "chunk_count=0" >> "$GITHUB_OUTPUT"
-            exit 0 # Exit successfully as there is no work
+
+          if [ "$LINES" -ge 200000 ]; then
+            echo "— ≥200 000 lines: splitting into 50 equal chunks"
+            split -n l/50 \
+                  --numeric-suffixes=1 --suffix-length=2 --additional-suffix=.txt \
+                  "$INPUT_FILE" "$CHUNK_DIR/chunk_"
+          elif [ "$LINES" -gt 1500 ]; then
+            echo "— > 1500 lines: splitting into 20 equal chunks"
+            split -n l/20 \
+                  --numeric-suffixes=1 --suffix-length=2 --additional-suffix=.txt \
+                  "$INPUT_FILE" "$CHUNK_DIR/chunk_"
+          else
+            echo "— ≤ 1500 lines: splitting into 200-line chunks"
+            split -l 200 \
+                  --numeric-suffixes=1 --suffix-length=2 --additional-suffix=.txt \
+                  "$INPUT_FILE" "$CHUNK_DIR/chunk_"
           fi
-          echo "-> Found $CHUNK_COUNT chunk files to process."
-          # --- 3. BUILD THE MATRIX (SIMPLIFIED & DIRECT METHOD) ---
-          # This is the most robust way: list files, pipe to jq to build the JSON.
-          # The jq command transforms each line of input into a JSON object.
-          # The -R (raw input) and -s (slurp) flags read the entire input into a single array.
+
+          # 3. Debug: list out what we just created
+          echo "Contents of $CHUNK_DIR:"
+          ls -R "$CHUNK_DIR" || echo "(none found)"
+
+          # 4. Build a JSON object for each chunk file
+          pairs=()
+          for CH in "$CHUNK_DIR"/chunk_*; do
+            [ -f "$CH" ] || continue
+            pairs+=( "{\"chunk\":\"$CH\"}" )
+          done
           
-          JSON_MATRIX=$(find "$CHUNK_DIR" -type f -name 'chunk_*' | jq -R -s -c 'split("\n") | map(select(length > 0))')
-          # --- 4. VERIFY AND OUTPUT ---
-          echo "-> Verifying that the generated matrix is valid JSON..."
-          echo "$JSON_MATRIX" | jq .
-          
-          echo "-> Matrix verification successful."
-          echo "Final Matrix: $JSON_MATRIX"
-          
-          echo "matrix=$JSON_MATRIX" >> "$GITHUB_OUTPUT"
-          echo "chunk_count=$CHUNK_COUNT" >> "$GITHUB_OUTPUT"
-          
-      - name: Upload Chunks as Artifact
+          # 5. Emit the chunk-level matrix
+          if [ ${#pairs[@]} -eq 0 ]; then
+            echo "No chunks created. Emitting empty matrix."
+            echo "matrix=[]" >> $GITHUB_OUTPUT
+          else
+            echo "matrix<<EOF" >> $GITHUB_OUTPUT
+            printf '%s\n' "${pairs[@]}" | jq -s . >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload chunks artifact
         uses: actions/upload-artifact@v4
         with:
-          name: output-chunks
-          path: chunks/
-          retention-days: 1
+          name: httpx-chunks
+          path: results/chunks/**
 
-  run-tools-in-parallel:
-    needs: prepare-chunks
-    if: ${{ needs.prepare-chunks.outputs.chunk_count > 0 }}
+  httpx:
+    needs: prepare_matrix
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/pcoder7/spider-puredns-actions:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GHCR_TOKEN }}
+    if: ${{ needs.prepare_matrix.outputs.matrix != '[]' }}
     strategy:
       fail-fast: false
       matrix:
-        # This creates a parallel job for each file path in the matrix output from the previous job
-        chunk_file: ${{ fromJson(needs.prepare-chunks.outputs.matrix) }}
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v3
-        with:
-          # Fetch full Git history so previous commits are available for comparison
-          fetch-depth: 0   
-          
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
+        # The matrix now contains simple objects like {"chunk": "path/to/chunk_01.txt"}
+        item: ${{ fromJson(needs.prepare_matrix.outputs.matrix) }}
+      max-parallel: 20
 
-      - name: Cache Go modules & binaries
-        uses: actions/cache@v3
-        with:
-          path: |
-            $HOME/go/pkg/mod
-            ~/.cache/go-build
-            $HOME/go/bin
-          key: ${{ runner.os }}-go-cache-${{ github.ref_name }}
-          restore-keys: |
-            ${{ runner.os }}-go-cache-
-      - name: Install Tools
+    steps:
+      - name: Ensure httpx & anew are installed
         run: |
-          # Installing httpx
           if ! command -v httpx >/dev/null; then
-            echo "Installing httpx…"
             go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
           else
-            echo "httpx already in cache"
-          fi    
-      - name: Download Chunks Artifact
+            echo "httpx already installed"
+          fi
+
+      - name: Download chunk files
         uses: actions/download-artifact@v4
         with:
-          name: output-chunks
-          path: chunks/
-      - name: Debug Matrix Context
+          name: httpx-chunks
+          # Download into the root, the path in the chunk file is relative from here
+          path: .
+
+      - name: Probe with httpx on ${{ matrix.item.chunk }}
         run: |
-          echo "matrix.chunk_file = ${{ matrix.chunk_file }}"
-      - name: Run tools on Chunks
-        id: run_tool
-        shell: bash
-        env:
-          CHUNK_PATH: ${{ matrix.chunk_file }}
-        run: |
-          set -ex
-          # verify chunk file exists
-          if [ ! -f "$CHUNK_PATH" ]; then
-            echo "::error:: Chunk file '$CHUNK_PATH' not found"
-            ls -R .
-            exit 1
+          CH="${{ matrix.item.chunk }}"
+          OUT="results/httpx_out" # Simplified, common output directory
+          mkdir -p "$OUT"
+
+          LINES=$(wc -l < "$CH")
+          echo "▶ Processing $CH — $LINES lines"
+
+          if [ "$LINES" -le 1500 ]; then
+            # small: single httpx run
+            echo "— ≤1500 lines: single httpx with 100 threads"
+            httpx -l "$CH" -silent -threads 100 \
+              -o "${OUT}/httpx_$(basename "$CH")"
+          else
+            # big: split into sub-chunks and run with GNU Parallel
+            TMP=$(mktemp -d)
+            split -l 1500 --numeric-suffixes=1 --suffix-length=2 \
+                  --additional-suffix=.txt \
+                  "$CH" "$TMP/sub_"
+
+            if [ "$LINES" -gt 35000 ]; then JOBS=12; THREADS=250
+            elif [ "$LINES" -gt 15000 ]; then JOBS=10; THREADS=200
+            else JOBS=8; THREADS=100
+            fi
+
+            echo "— Launching parallel -j$JOBS with $THREADS threads"
+            parallel -j"$JOBS" \
+              httpx -l {} -silent -threads "$THREADS" -retries 1 -random-agent -timeout 10 \
+                    -o "$OUT/httpx_{/.}.txt" \
+              ::: "$TMP"/sub_*.txt
+            rm -rf "$TMP"
           fi
-          # derive basename for artifact naming
-          BASENAME=$(basename "$CHUNK_PATH")
-          echo "basename=$BASENAME" >> $GITHUB_OUTPUT
-          OUTPUT_DIR="results"
-          mkdir -p "$OUTPUT_DIR"
-          OUTPUT_FILE="$OUTPUT_DIR/result_${BASENAME}"
-          echo "Running httpx on $CHUNK_PATH → $OUTPUT_FILE"
-          PUBLIC_IP=$(curl -s https://api.ipify.org) && echo "The public IP of this runner is: $PUBLIC_IP"
-          # fixed spacing between flags
-          httpx -l "$CHUNK_PATH" -t 100 \
-                -o "$OUTPUT_FILE" \
-                -rl 100 \
-                -no-color \
-                -random-agent \
-                -silent                  
-          # ------------------------------------
-          echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
+
+          # Consolidate results for this chunk (from sub-chunks if they exist)
+          FINAL_CHUNK_FILE="${OUT}/httpx_$(basename "$CH")"
+          find "$OUT" -maxdepth 1 -type f -name 'httpx_sub_*.txt' -print0 \
+            | xargs -0 --no-run-if-empty cat \
+            | sort -u > "$FINAL_CHUNK_FILE"
           
-      - name: Compute Safe Chunk Name
-        id: safe_chunk
+          # Cleanup intermediate sub-chunk results
+          find "$OUT" -maxdepth 1 -type f -name 'httpx_sub_*.txt' -delete
+
+      - name: Compute artifact details
+        id: art_details
         run: |
-          SAFE_CHUNK="$(echo "${{ matrix.chunk_file }}" | tr '/' '_')"
-          echo "safe_chunk=$SAFE_CHUNK" >> $GITHUB_OUTPUT
-      - name: Upload Individual Result Artifact
+          CHUNK_BASENAME=$(basename "${{ matrix.item.chunk }}")
+          ARTIFACT_NAME="httpx-${CHUNK_BASENAME}"
+          FILE_TO_UPLOAD="results/httpx_out/httpx_${CHUNK_BASENAME}"
+          echo "artifact_name=${ARTIFACT_NAME}" >> $GITHUB_OUTPUT
+          echo "file_to_upload=${FILE_TO_UPLOAD}" >> $GITHUB_OUTPUT
+
+      - name: Upload per-chunk httpx results
         uses: actions/upload-artifact@v4
         with:
-          name: result-${{ steps.safe_chunk.outputs.safe_chunk }}
-          path: ${{ steps.run_tool.outputs.output_file }}
-          retention-days: 1
+          name: ${{ steps.art_details.outputs.artifact_name }}
+          path: ${{ steps.art_details.outputs.file_to_upload }}
+          if-no-files-found: error
 
-  aggregate-results:
-    needs: run-tools-in-parallel
-    if: always() # This ensures the aggregation job runs even if some nuclei jobs fail
+  aggregate_results:
+    needs: [prepare_matrix, httpx]
     runs-on: ubuntu-latest
+    if: ${{ needs.prepare_matrix.outputs.matrix != '[]' }}
     steps:
-      - name: Create Temporary Directory for Results
-        run: mkdir -p temp-results
-
-      - name: Download All Result Artifacts
+      - name: Download all httpx chunk artifacts
         uses: actions/download-artifact@v4
         with:
-          path: temp-results/
-          pattern: result-*
+          path: temp-results
+          pattern: httpx-chunk_*
           merge-multiple: true
 
-      - name: Aggregate All Results into a Single File
-        id: aggregate
+      - name: Aggregate all chunk results
         run: |
-          echo "Aggregating all results..."
-          # Combine all downloaded result files into one.
-          # The `sort -u` command will also remove any duplicate findings.
-          cat temp-results/* | sort -u > nuclei-final-results.txt
-          echo "Final aggregated results created at nuclei-final-results.txt"
-          echo "Total unique findings: $(wc -l < nuclei-final-results.txt)"
-      - name: Upload Final Aggregated Results
+          FINAL_RESULT_FILE="final_httpx_results.txt"
+          echo "Aggregating all chunk results into $FINAL_RESULT_FILE..."
+          
+          # Combine all downloaded result files, sort, and remove duplicates
+          cat temp-results/* | sort -u > "$FINAL_RESULT_FILE"
+
+          echo "Aggregation complete. Total unique findings: $(wc -l < $FINAL_RESULT_FILE)"
+
+      - name: Upload final aggregated result
         uses: actions/upload-artifact@v4
         with:
-          name: final-nuclei-results
-          path: nuclei-final-results.txt
-          retention-days: 1
+          name: final-aggregated-result
+          path: final_httpx_results.txt
