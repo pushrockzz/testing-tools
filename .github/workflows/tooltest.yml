@@ -181,6 +181,7 @@ jobs:
           name: ${{ steps.art_details.outputs.artifact_name }}
           path: ${{ steps.art_details.outputs.file_to_upload }}
           if-no-files-found: error
+          retention-days: 1
 
   aggregate_results:
     needs: [prepare_matrix, httpx]
@@ -209,3 +210,4 @@ jobs:
         with:
           name: final-aggregated-result
           path: final_httpx_results.txt
+          retention-days: 1
