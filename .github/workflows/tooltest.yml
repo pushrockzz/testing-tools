@@ -100,7 +100,9 @@ jobs:
         run: |
           # Install system dependencies
           apt-get update -y
+          apt install gcc -y
           apt-get install -y build-essential git ripgrep
+          
 
           # Ensure Go tools are in PATH
           export PATH=$PATH:$(go env GOPATH)/bin
@@ -115,7 +117,7 @@ jobs:
 
           # Install caduceus
           echo "Installing caduceus..."
-          go install github.com/g0ldencybersec/Caduceus@latest
+          go install github.com/g0ldencybersec/Caduceus/cmd/caduceus@latest
 
           # Install CloudRecon (requested, though not used in current pipeline)
           echo "Installing CloudRecon..."
