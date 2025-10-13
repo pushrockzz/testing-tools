@@ -200,7 +200,7 @@ jobs:
             # small: single httpx run
             echo "— ≤1500 lines: single httpx with 100 threads"
             httpx -l "$COMBINED_TARGETS_FILE" -silent -threads 100 \
-              -o "${HTTPX_FINAL_OUTPUT_PATH}" | nuclei -t ~/nuclei-templates/http/exposed-panels/globalprotect-panel.yaml -silent
+              -o "${HTTPX_FINAL_OUTPUT_PATH}" 
           else
             # big: split into sub-chunks and run with GNU Parallel
             TMP=$(mktemp -d)
@@ -216,7 +216,7 @@ jobs:
             echo "— Launching parallel -j$JOBS with $THREADS threads"
             parallel -j"$JOBS" \
               httpx -l {} -silent -threads "$THREADS" -retries 1 -random-agent -timeout 10 \
-                    -o "$HTTPX_OUT_DIR/httpx_sub_{/.}.txt" |  nuclei -t ~/nuclei-templates/http/exposed-panels/globalprotect-panel.yaml -silent
+                    -o "$HTTPX_OUT_DIR/httpx_sub_{/.}.txt"
               ::: "$TMP"/sub_*.txt
             rm -rf "$TMP"
           fi
@@ -229,81 +229,59 @@ jobs:
           # Cleanup intermediate sub-chunk results
           find "$HTTPX_OUT_DIR" -maxdepth 1 -type f -name 'httpx_sub_sub_*.txt' -delete
 
-      - name: Compute artifact details for all outputs
+      - name: Prepare artifact for upload
         id: art_details
         run: |
           CH_BASENAME=$(basename "${{ matrix.item.chunk }}")
+          ARTIFACT_NAME="results-${CH_BASENAME%.txt}" # e.g., results-chunk_01
+          ARTIFACT_DIR="staging/${ARTIFACT_NAME}"     # e.g., staging/results-chunk_01
 
-          # Hakip2host filtered output
-          echo "hakip2host_artifact_name=hakip2host-filtered-${CH_BASENAME}" >> $GITHUB_OUTPUT
-          echo "hakip2host_file_to_upload=results/processed_out/hakip2host_filtered_${CH_BASENAME}" >> $GITHUB_OUTPUT
+          echo "Preparing artifact directory: ${ARTIFACT_DIR}"
+          mkdir -p "$ARTIFACT_DIR"
 
-          # Caduceus output
-          echo "caduceus_artifact_name=caduceus-${CH_BASENAME}" >> $GITHUB_OUTPUT
-          echo "caduceus_file_to_upload=results/processed_out/caduceus_${CH_BASENAME}" >> $GITHUB_OUTPUT
+          # Move result files into the staging directory
+          # Using --no-clobber to prevent errors if a file doesn't exist
+          mv -n "results/processed_out/hakip2host_filtered_${CH_BASENAME}" "$ARTIFACT_DIR/"
+          mv -n "results/processed_out/caduceus_${CH_BASENAME}" "$ARTIFACT_DIR/"
+          mv -n "results/httpx_out/httpx_results_${CH_BASENAME}" "$ARTIFACT_DIR/"
+          
+          echo "artifact_name=${ARTIFACT_NAME}" >> $GITHUB_OUTPUT
+          echo "artifact_path=${ARTIFACT_DIR}" >> $GITHUB_OUTPUT
 
-          # Httpx results
-          echo "httpx_artifact_name=httpx-results-${CH_BASENAME}" >> $GITHUB_OUTPUT
-          echo "httpx_file_to_upload=results/httpx_out/httpx_results_${CH_BASENAME}" >> $GITHUB_OUTPUT
-
-      - name: Upload per-chunk hakip2host filtered results
+      - name: Upload per-chunk results directory
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.art_details.outputs.hakip2host_artifact_name }}
-          path: ${{ steps.art_details.outputs.hakip2host_file_to_upload }}
+          name: ${{ steps.art_details.outputs.artifact_name }}
+          path: ${{ steps.art_details.outputs.artifact_path }}
           if-no-files-found: ignore
           retention-days: 1
 
-      - name: Upload per-chunk caduceus results
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.art_details.outputs.caduceus_artifact_name }}
-          path: ${{ steps.art_details.outputs.caduceus_file_to_upload }}
-          if-no-files-found: ignore
-          retention-days: 1
-
-      - name: Upload per-chunk httpx results
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.art_details.outputs.httpx_artifact_name }}
-          path: ${{ steps.art_details.outputs.httpx_file_to_upload }}
-          if-no-files-found: ignore
-          retention-days: 1
 
   aggregate_results:
     needs: [prepare_matrix, httpx]
     runs-on: ubuntu-latest
     if: ${{ needs.prepare_matrix.outputs.matrix != '[]' }}
     steps:
-      - name: Download all processed chunk artifacts
+
+      - name: Download all per-chunk result directories
         uses: actions/download-artifact@v4
         with:
           path: temp-results
-          pattern: |
-            hakip2host-filtered-chunk_*
-            caduceus-chunk_*
-            httpx-results-chunk_*
+          pattern: results-chunk_*
           merge-multiple: true
+          
 
       - name: Aggregate all chunk results
         run: |
+          # This part does NOT need to be changed.
+          # The 'find' command will correctly search inside the downloaded directories
+          # (e.g., temp-results/results-chunk_01/, temp-results/results-chunk_02/, etc.)
+          
           # Aggregating hakip2host filtered results
           HAKIP2HOST_FINAL_FILE="final_hakip2host_filtered_results.txt"
           echo "Aggregating hakip2host filtered results into $HAKIP2HOST_FINAL_FILE..."
-          find temp-results -name "hakip2host-filtered-chunk_*" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$HAKIP2HOST_FINAL_FILE"
+          find temp-results -name "hakip2host-filtered-chunk_*.txt" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$HAKIP2HOST_FINAL_FILE"
           echo "Aggregation complete. Total unique hakip2host findings: $(wc -l < "$HAKIP2HOST_FINAL_FILE")"
-
-          # Aggregating caduceus results
-          CADUCEUS_FINAL_FILE="final_caduceus_results.txt"
-          echo "Aggregating caduceus results into $CADUCEUS_FINAL_FILE..."
-          find temp-results -name "caduceus-chunk_*" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$CADUCEUS_FINAL_FILE"
-          echo "Aggregation complete. Total unique caduceus findings: $(wc -l < "$CADUCEUS_FINAL_FILE")"
-
-          # Aggregating httpx results
-          HTTPX_FINAL_FILE="final_httpx_results.txt"
-          echo "Aggregating httpx results into $HTTPX_FINAL_FILE..."
-          find temp-results -name "httpx-results-chunk_*" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$HTTPX_FINAL_FILE"
-          echo "Aggregation complete. Total unique httpx findings: $(wc -l < "$HTTPX_FINAL_FILE")"
 
 
       - name: Upload final aggregated results
