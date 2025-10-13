@@ -78,6 +78,7 @@ jobs:
         with:
           name: httpx-chunks
           path: results/chunks/**
+          retention-days: 1
 
   httpx:
     needs: prepare_matrix
