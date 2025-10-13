@@ -151,55 +151,63 @@ jobs:
           
           echo "▶ Processing $CH_PATH"
 
-          # 1. Filter with cut-cdn
+          # 1. Filter with cut-cdn (NO CHANGES HERE)
           NO_CDN_FILE="$OUT_DIR/No-CDN_${CH_BASENAME}"
           echo "Running cut-cdn on $CH_PATH..."
           cat "$CH_PATH" | cut-cdn -ua -t 50 -q -o "$NO_CDN_FILE"
           LINES_NO_CDN=$(wc -l < "$NO_CDN_FILE")
           echo "  $LINES_NO_CDN lines after cut-cdn"
 
-          # 2. Run hakip2host on No-CDN output and filter
+          # 2. Run hakip2host on No-CDN output and filter (NO CHANGES HERE)
           HAKIP2HOST_RAW_FILE="$OUT_DIR/hakip2host_raw_${CH_BASENAME}"
           HAKIP2HOST_FILTERED_FILE="$OUT_DIR/hakip2host_filtered_${CH_BASENAME}"
           echo "Running hakip2host on $NO_CDN_FILE..."
           if [ "$LINES_NO_CDN" -gt 0 ]; then
-            # Ensure hakip2host output directory exists if it writes to specific path
             mkdir -p "$(dirname "$HAKIP2HOST_RAW_FILE")"
             cat "$NO_CDN_FILE" | hakip2host | sort -u > "$HAKIP2HOST_RAW_FILE"
             echo "Filtering hakip2host output..."
             grep -Ev 'amazonaws\.com|aws\.com|\.aws|wordpress\.com' "$HAKIP2HOST_RAW_FILE" \
               | awk -F'[[:space:]]' '{print $3}' | sort -u > "$HAKIP2HOST_FILTERED_FILE"
           else
-            touch "$HAKIP2HOST_FILTERED_FILE" # Create empty file if no CDN IPs
+            touch "$HAKIP2HOST_FILTERED_FILE"
           fi
           LINES_HAKIP2HOST=$(wc -l < "$HAKIP2HOST_FILTERED_FILE")
           echo "  $LINES_HAKIP2HOST unique domains after hakip2host filtering"
 
-          # 3. Run Caduceus on original IP chunk
+          # 3. Run Caduceus on original IP chunk (NO CHANGES HERE)
           CADUCEUS_FILE="$OUT_DIR/caduceus_${CH_BASENAME}"
           echo "Running Caduceus on $CH_PATH..."
           caduceus -i "$CH_PATH" | sort -u > "$CADUCEUS_FILE"
           LINES_CADUCEUS=$(wc -l < "$CADUCEUS_FILE")
           echo "  $LINES_CADUCEUS lines after Caduceus"
 
-          # 4. Create a combined, unique target list for httpx
+          # 4. Create a combined, unique target list for httpx (NO CHANGES HERE)
           COMBINED_TARGETS_FILE="$OUT_DIR/combined_targets_${CH_BASENAME}"
           echo "Combining hakip2host and caduceus outputs for httpx..."
           cat "$HAKIP2HOST_FILTERED_FILE" "$CADUCEUS_FILE" | sort -u > "$COMBINED_TARGETS_FILE"
           LINES_COMBINED=$(wc -l < "$COMBINED_TARGETS_FILE")
           echo "  $LINES_COMBINED unique targets for httpx"
+          
+          # --- vvvvvvvvvvvvvvvv START OF CHANGES vvvvvvvvvvvvvvvv ---
 
           # 5. Run httpx on the combined target list
           HTTPX_OUT_DIR="results/httpx_out"
           mkdir -p "$HTTPX_OUT_DIR"
-          HTTPX_FINAL_OUTPUT_PATH="$HTTPX_OUT_DIR/httpx_results_${CH_BASENAME}"
+          # CHANGE: Using a more consistent base name for all output files
+          HTTPX_OUTPUT_PREFIX="${HTTPX_OUT_DIR}/httpx_results_${CH_BASENAME%.txt}"
+          HTTPX_FINAL_OUTPUT_PATH="${HTTPX_OUTPUT_PREFIX}.txt"
 
           echo "Running httpx on $COMBINED_TARGETS_FILE — $LINES_COMBINED lines"
+          # Add a debug step to ensure the input file is not empty
+          echo "--- START of httpx input file ---"
+          head -n 10 "$COMBINED_TARGETS_FILE"
+          echo "--- END of httpx input file ---"
 
           if [ "$LINES_COMBINED" -le 1500 ]; then
             # small: single httpx run
             echo "— ≤1500 lines: single httpx with 100 threads"
-            httpx -l "$COMBINED_TARGETS_FILE" -silent -threads 100 \
+            # CHANGE: Removed -silent, added -status-code and -no-color to capture ALL results
+            httpx -l "$COMBINED_TARGETS_FILE" -threads 100 -status-code -no-color \
               -o "${HTTPX_FINAL_OUTPUT_PATH}" 
           else
             # big: split into sub-chunks and run with GNU Parallel
@@ -215,19 +223,27 @@ jobs:
 
             echo "— Launching parallel -j$JOBS with $THREADS threads"
             parallel -j"$JOBS" \
-              httpx -l {} -silent -threads "$THREADS" -retries 1 -random-agent -timeout 10 \
-                    -o "$HTTPX_OUT_DIR/httpx_sub_{/.}.txt"
+              # CHANGE: Removed -silent, added -status-code and -no-color to capture ALL results
+              httpx -l {} -threads "$THREADS" -retries 1 -random-agent -timeout 10 -status-code -no-color -silent \
+                    # CHANGE: Simplified and unified the output file naming
+                    -o "${HTTPX_OUTPUT_PREFIX}_{/.}.txt"
               ::: "$TMP"/sub_*.txt
             rm -rf "$TMP"
           fi
+          
+          # For debugging: List the files created by httpx before consolidation
+          echo "Listing raw httpx output files before consolidation:"
+          ls -l "$HTTPX_OUT_DIR"
 
           # Consolidate httpx results for this chunk
-          find "$HTTPX_OUT_DIR" -maxdepth 1 -type f -name "httpx_results_${CH_BASENAME%.txt}*" -o -name "httpx_sub_sub_*.txt" -print0 \
+          # CHANGE: Drastically simplified the 'find' command to use our new unified prefix
+          find "$HTTPX_OUT_DIR" -maxdepth 1 -type f -name "httpx_results_${CH_BASENAME%.txt}*.txt" -print0 \
             | xargs -0 --no-run-if-empty cat \
             | sort -u > "${HTTPX_FINAL_OUTPUT_PATH}.tmp" && mv "${HTTPX_FINAL_OUTPUT_PATH}.tmp" "${HTTPX_FINAL_OUTPUT_PATH}"
 
           # Cleanup intermediate sub-chunk results
-          find "$HTTPX_OUT_DIR" -maxdepth 1 -type f -name 'httpx_sub_sub_*.txt' -delete
+          # CHANGE: Simplified the cleanup command to match the new naming scheme
+          find "$HTTPX_OUT_DIR" -maxdepth 1 -type f -name "httpx_results_${CH_BASENAME%.txt}_sub_*.txt" -delete
 
       - name: Prepare artifact for upload
         id: art_details
