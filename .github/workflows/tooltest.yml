@@ -96,19 +96,36 @@ jobs:
       max-parallel: 20
 
     steps:
-      - name: Ensure httpx is installed
+      - name: Install dependencies and tools
         run: |
-          if ! command -v httpx >/dev/null; then
-            go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          else
-            echo "httpx already installed"
-          fi
+          # Install system dependencies
+          apt-get update -y
+          apt-get install -y build-essential git ripgrep
+
+          # Ensure Go tools are in PATH
+          export PATH=$PATH:$(go env GOPATH)/bin
+
+          # Install cut-cdn
+          echo "Installing cut-cdn..."
+          go install github.com/ImAyrix/cut-cdn@latest
+
+          # Install hakip2host
+          echo "Installing hakip2host..."
+          go install github.com/hakluke/hakip2host@latest
+
+          # Install caduceus
+          echo "Installing caduceus..."
+          go install github.com/g0ldencybersec/Caduceus@latest
+
+          # Install CloudRecon (requested, though not used in current pipeline)
+          echo "Installing CloudRecon..."
+          go install github.com/g0ldencybersec/CloudRecon@latest
+
 
       - name: Download chunk files
         uses: actions/download-artifact@v4
         with:
           name: httpx-chunks
-          # FIX: Download the files INTO the directory structure the script expects.
           # This will create results/chunks/ and place the files inside it.
           path: results/chunks
 
@@ -117,73 +134,168 @@ jobs:
           echo "Listing files in the workspace to confirm download location:"
           ls -R
 
-      - name: Probe with httpx on ${{ matrix.item.chunk }}
+      - name: Process ${{ matrix.item.chunk }} with cut-cdn, hakip2host, caduceus, inscope, and httpx
         run: |
-          CH="${{ matrix.item.chunk }}"
-          # This path will now be correct because the download step recreated it.
-          if [ ! -f "$CH" ]; then
-            echo "::error::File not found at the expected path: $CH"
+          CH_PATH="${{ matrix.item.chunk }}"
+          CH_BASENAME=$(basename "$CH_PATH")
+          OUT_DIR="results/processed_out"
+          mkdir -p "$OUT_DIR"
+
+          if [ ! -f "$CH_PATH" ]; then
+            echo "::error::File not found at the expected path: $CH_PATH"
             exit 0
           fi
           
-          OUT="results/httpx_out" # Simplified, common output directory
-          mkdir -p "$OUT"
+          echo "▶ Processing $CH_PATH"
 
-          LINES=$(wc -l < "$CH")
-          echo "▶ Processing $CH — $LINES lines"
+          # 1. Filter with cut-cdn
+          NO_CDN_FILE="$OUT_DIR/No-CDN_${CH_BASENAME}"
+          echo "Running cut-cdn on $CH_PATH..."
+          cut-cdn -l "$CH_PATH" -o "$NO_CDN_FILE"
+          LINES_NO_CDN=$(wc -l < "$NO_CDN_FILE")
+          echo "  $LINES_NO_CDN lines after cut-cdn"
 
-          if [ "$LINES" -le 1500 ]; then
+          # 2. Run hakip2host on No-CDN output and filter
+          HAKIP2HOST_RAW_FILE="$OUT_DIR/hakip2host_raw_${CH_BASENAME}"
+          HAKIP2HOST_FILTERED_FILE="$OUT_DIR/hakip2host_filtered_${CH_BASENAME}"
+          echo "Running hakip2host on $NO_CDN_FILE..."
+          if [ "$LINES_NO_CDN" -gt 0 ]; then
+            # Ensure hakip2host output directory exists if it writes to specific path
+            mkdir -p "$(dirname "$HAKIP2HOST_RAW_FILE")"
+            hakip2host -l "$NO_CDN_FILE" -o "$HAKIP2HOST_RAW_FILE"
+            echo "Filtering hakip2host output..."
+            # Using grep -v with regex for exclusion, then awk for field selection, then sort -u
+            grep -Ev 'amazonaws\.com|aws\.com|\.aws|wordpress\.com' "$HAKIP2HOST_RAW_FILE" \
+              | awk -F'[[:space:]]' '{print $3}' | sort -u > "$HAKIP2HOST_FILTERED_FILE"
+          else
+            touch "$HAKIP2HOST_FILTERED_FILE" # Create empty file if no CDN IPs
+          fi
+          LINES_HAKIP2HOST=$(wc -l < "$HAKIP2HOST_FILTERED_FILE")
+          echo "  $LINES_HAKIP2HOST unique domains after hakip2host filtering"
+
+          # 3. Run Caduceus on original IP chunk
+          CADUCEUS_FILE="$OUT_DIR/caduceus_${CH_BASENAME}"
+          echo "Running Caduceus on $CH_PATH..."
+          caduceus -l "$CH_PATH" -o "$CADUCEUS_FILE"
+          LINES_CADUCEUS=$(wc -l < "$CADUCEUS_FILE")
+          echo "  $LINES_CADUCEUS lines after Caduceus"
+
+          # 4. Create inscope.txt (combined and unique hakip2host and caduceus outputs)
+          # Assuming 'inscope tool' here refers to combining and deduplicating
+          INSCOPE_FILE="$OUT_DIR/inscope_${CH_BASENAME}"
+          echo "Combining hakip2host and caduceus outputs into $INSCOPE_FILE..."
+          cat "$HAKIP2HOST_FILTERED_FILE" "$CADUCEUS_FILE" | sort -u > "$INSCOPE_FILE"
+          LINES_INSCOPE=$(wc -l < "$INSCOPE_FILE")
+          echo "  $LINES_INSCOPE unique targets in inscope file"
+
+          # 5. Run httpx on inscope.txt
+          HTTPX_OUT_DIR="results/httpx_out" # Simplified, common output directory
+          mkdir -p "$HTTPX_OUT_DIR"
+          # Base name for httpx output from this chunk
+          HTTPX_FINAL_OUTPUT_BASE="httpx_inscope_${CH_BASENAME}"
+          HTTPX_FINAL_OUTPUT_PATH="$HTTPX_OUT_DIR/$HTTPX_FINAL_OUTPUT_BASE"
+
+          echo "Running httpx on $INSCOPE_FILE — $LINES_INSCOPE lines"
+
+          if [ "$LINES_INSCOPE" -le 1500 ]; then
             # small: single httpx run
             echo "— ≤1500 lines: single httpx with 100 threads"
-            httpx -l "$CH" -silent -threads 100 \
-              -o "${OUT}/httpx_$(basename "$CH")" | nuclei -t ~/nuclei-templates/http/exposed-panels/globalprotect-panel.yaml -silent
+            httpx -l "$INSCOPE_FILE" -silent -threads 100 \
+              -o "${HTTPX_FINAL_OUTPUT_PATH}" | nuclei -t ~/nuclei-templates/http/exposed-panels/globalprotect-panel.yaml -silent
           else
             # big: split into sub-chunks and run with GNU Parallel
             TMP=$(mktemp -d)
             split -l 1500 --numeric-suffixes=1 --suffix-length=2 \
                   --additional-suffix=.txt \
-                  "$CH" "$TMP/sub_"
+                  "$INSCOPE_FILE" "$TMP/sub_"
 
-            if [ "$LINES" -gt 35000 ]; then JOBS=12; THREADS=250
-            elif [ "$LINES" -gt 15000 ]; then JOBS=10; THREADS=200
+            if [ "$LINES_INSCOPE" -gt 35000 ]; then JOBS=12; THREADS=250
+            elif [ "$LINES_INSCOPE" -gt 15000 ]; then JOBS=10; THREADS=200
             else JOBS=8; THREADS=100
             fi
 
             echo "— Launching parallel -j$JOBS with $THREADS threads"
+            # Use a slightly different output naming for sub-chunks to avoid conflicts
+            # This generates files like httpx_sub_inscope_sub_01.txt, etc.
             parallel -j"$JOBS" \
               httpx -l {} -silent -threads "$THREADS" -retries 1 -random-agent -timeout 10 \
-                    -o "$OUT/httpx_{/.}.txt" |  nuclei -t ~/nuclei-templates/http/exposed-panels/globalprotect-panel.yaml -silent
+                    -o "$HTTPX_OUT_DIR/httpx_sub_inscope_{/.}.txt" |  nuclei -t ~/nuclei-templates/http/exposed-panels/globalprotect-panel.yaml -silent
               ::: "$TMP"/sub_*.txt
             rm -rf "$TMP"
           fi
 
-          # Consolidate results for this chunk (from sub-chunks if they exist)
-          FINAL_CHUNK_FILE="${OUT}/httpx_$(basename "$CH")"
-          
-          # Find all potential result files for THIS CHUNK and consolidate them
+          # Consolidate httpx results for this chunk (from sub-chunks if they exist)
           # This correctly handles both the single-run and parallel-run cases
-          find "$OUT" -maxdepth 1 -type f -name "httpx_$(basename "$CH" .txt)*" -print0 \
+          # Finds all files starting with httpx_inscope_<chunk_basename> or httpx_sub_inscope_<sub_chunk_basename>
+          find "$HTTPX_OUT_DIR" -maxdepth 1 -type f -name "${HTTPX_FINAL_OUTPUT_BASE%.txt}*" -print0 \
             | xargs -0 --no-run-if-empty cat \
-            | sort -u > "$FINAL_CHUNK_FILE.tmp" && mv "$FINAL_CHUNK_FILE.tmp" "$FINAL_CHUNK_FILE"
+            | sort -u > "${HTTPX_FINAL_OUTPUT_PATH}.tmp" && mv "${HTTPX_FINAL_OUTPUT_PATH}.tmp" "${HTTPX_FINAL_OUTPUT_PATH}"
 
-          # Cleanup intermediate sub-chunk results
-          find "$OUT" -maxdepth 1 -type f -name 'httpx_sub_*.txt' -delete
+          # Cleanup intermediate sub-chunk results from parallel run
+          find "$HTTPX_OUT_DIR" -maxdepth 1 -type f -name 'httpx_sub_inscope_*.txt' -delete
 
-      - name: Compute artifact details
+          # Make sure all generated files are readable by subsequent steps
+          chmod -R 644 "$OUT_DIR" "$HTTPX_OUT_DIR"
+
+      - name: Compute artifact details for all outputs
         id: art_details
         run: |
-          CHUNK_BASENAME=$(basename "${{ matrix.item.chunk }}")
-          ARTIFACT_NAME="httpx-${CHUNK_BASENAME}"
-          FILE_TO_UPLOAD="results/httpx_out/httpx_${CHUNK_BASENAME}"
-          echo "artifact_name=${ARTIFACT_NAME}" >> $GITHUB_OUTPUT
-          echo "file_to_upload=${FILE_TO_UPLOAD}" >> $GITHUB_OUTPUT
+          CH_BASENAME=$(basename "${{ matrix.item.chunk }}")
+
+          # Hakip2host filtered output
+          HAKIP2HOST_ARTIFACT_NAME="hakip2host-filtered-${CH_BASENAME}"
+          HAKIP2HOST_FILE_TO_UPLOAD="results/processed_out/hakip2host_filtered_${CH_BASENAME}"
+          echo "hakip2host_artifact_name=${HAKIP2HOST_ARTIFACT_NAME}" >> $GITHUB_OUTPUT
+          echo "hakip2host_file_to_upload=${HAKIP2HOST_FILE_TO_UPLOAD}" >> $GITHUB_OUTPUT
+
+          # Caduceus output
+          CADUCEUS_ARTIFACT_NAME="caduceus-${CH_BASENAME}"
+          CADUCEUS_FILE_TO_UPLOAD="results/processed_out/caduceus_${CH_BASENAME}"
+          echo "caduceus_artifact_name=${CADUCEUS_ARTIFACT_NAME}" >> $GITHUB_OUTPUT
+          echo "caduceus_file_to_upload=${CADUCEUS_FILE_TO_UPLOAD}" >> $GITHUB_OUTPUT
+
+          # Inscope output (combined hakip2host & caduceus)
+          INSCOPE_ARTIFACT_NAME="inscope-combined-${CH_BASENAME}"
+          INSCOPE_FILE_TO_UPLOAD="results/processed_out/inscope_${CH_BASENAME}"
+          echo "inscope_artifact_name=${INSCOPE_ARTIFACT_NAME}" >> $GITHUB_OUTPUT
+          echo "inscope_file_to_upload=${INSCOPE_FILE_TO_UPLOAD}" >> $GITHUB_OUTPUT
+
+          # Httpx results (from inscope output)
+          HTTPX_ARTIFACT_NAME="httpx-inscope-${CH_BASENAME}"
+          HTTPX_FILE_TO_UPLOAD="results/httpx_out/httpx_inscope_${CH_BASENAME}"
+          echo "httpx_artifact_name=${HTTPX_ARTIFACT_NAME}" >> $GITHUB_OUTPUT
+          echo "httpx_file_to_upload=${HTTPX_FILE_TO_UPLOAD}" >> $GITHUB_OUTPUT
+
+      - name: Upload per-chunk hakip2host filtered results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.art_details.outputs.hakip2host_artifact_name }}
+          path: ${{ steps.art_details.outputs.hakip2host_file_to_upload }}
+          if-no-files-found: ignore # Allow empty files if no domains pass filters
+          retention-days: 1
+
+      - name: Upload per-chunk caduceus results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.art_details.outputs.caduceus_artifact_name }}
+          path: ${{ steps.art_details.outputs.caduceus_file_to_upload }}
+          if-no-files-found: ignore # Allow empty files
+          retention-days: 1
+
+      - name: Upload per-chunk inscope combined results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.art_details.outputs.inscope_artifact_name }}
+          path: ${{ steps.art_details.outputs.inscope_file_to_upload }}
+          if-no-files-found: ignore # Allow empty files
+          retention-days: 1
 
       - name: Upload per-chunk httpx results
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.art_details.outputs.artifact_name }}
-          path: ${{ steps.art_details.outputs.file_to_upload }}
-          if-no-files-found: error
+          name: ${{ steps.art_details.outputs.httpx_artifact_name }}
+          path: ${{ steps.art_details.outputs.httpx_file_to_upload }}
+          if-no-files-found: ignore # Allow empty files if inscope.txt was empty
           retention-days: 1
 
   aggregate_results:
@@ -191,26 +303,51 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ needs.prepare_matrix.outputs.matrix != '[]' }}
     steps:
-      - name: Download all httpx chunk artifacts
+      - name: Download all processed chunk artifacts
         uses: actions/download-artifact@v4
         with:
           path: temp-results
-          pattern: httpx-chunk_*
+          pattern: |
+            hakip2host-filtered-chunk_*
+            caduceus-chunk_*
+            inscope-combined-chunk_*
+            httpx-inscope-chunk_*
           merge-multiple: true
 
       - name: Aggregate all chunk results
         run: |
-          FINAL_RESULT_FILE="final_httpx_results.txt"
-          echo "Aggregating all chunk results into $FINAL_RESULT_FILE..."
-          
-          # Combine all downloaded result files, sort, and remove duplicates
-          cat temp-results/* | sort -u > "$FINAL_RESULT_FILE"
+          # Aggregating hakip2host filtered results
+          HAKIP2HOST_FINAL_FILE="final_hakip2host_filtered_results.txt"
+          echo "Aggregating hakip2host filtered results into $HAKIP2HOST_FINAL_FILE..."
+          find temp-results -name "hakip2host-filtered-chunk_*" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$HAKIP2HOST_FINAL_FILE"
+          echo "Aggregation complete. Total unique hakip2host findings: $(wc -l < "$HAKIP2HOST_FINAL_FILE")"
 
-          echo "Aggregation complete. Total unique findings: $(wc -l < $FINAL_RESULT_FILE)"
+          # Aggregating caduceus results
+          CADUCEUS_FINAL_FILE="final_caduceus_results.txt"
+          echo "Aggregating caduceus results into $CADUCEUS_FINAL_FILE..."
+          find temp-results -name "caduceus-chunk_*" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$CADUCEUS_FINAL_FILE"
+          echo "Aggregation complete. Total unique caduceus findings: $(wc -l < "$CADUCEUS_FINAL_FILE")"
 
-      - name: Upload final aggregated result
+          # Aggregating inscope combined results
+          INSCOPE_FINAL_FILE="final_inscope_combined_results.txt"
+          echo "Aggregating inscope combined results into $INSCOPE_FINAL_FILE..."
+          find temp-results -name "inscope-combined-chunk_*" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$INSCOPE_FINAL_FILE"
+          echo "Aggregation complete. Total unique inscope findings: $(wc -l < "$INSCOPE_FINAL_FILE")"
+
+          # Aggregating httpx results (from inscope)
+          HTTPX_FINAL_FILE="final_httpx_results.txt"
+          echo "Aggregating httpx results (from inscope) into $HTTPX_FINAL_FILE..."
+          find temp-results -name "httpx-inscope-chunk_*" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$HTTPX_FINAL_FILE"
+          echo "Aggregation complete. Total unique httpx findings: $(wc -l < "$HTTPX_FINAL_FILE")"
+
+
+      - name: Upload final aggregated results
         uses: actions/upload-artifact@v4
         with:
-          name: final-aggregated-result
-          path: final_httpx_results.txt
+          name: final-aggregated-results
+          path: |
+            final_hakip2host_filtered_results.txt
+            final_caduceus_results.txt
+            final_inscope_combined_results.txt
+            final_httpx_results.txt
           retention-days: 1
