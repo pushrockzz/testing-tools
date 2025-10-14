@@ -296,26 +296,37 @@ jobs:
 
       - name: Aggregate all chunk results
         run: |
-          # This 'find' command is already correct and will now work perfectly
-          # because it recursively searches the directories created in the download step.
           
+
           # Aggregating hakip2host filtered results
           HAKIP2HOST_FINAL_FILE="final_hakip2host_filtered_results.txt"
           echo "Aggregating hakip2host filtered results into $HAKIP2HOST_FINAL_FILE..."
-          find temp-results -name "hakip2host-filtered-chunk_*.txt" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$HAKIP2HOST_FINAL_FILE"
+          
+          # FIX: Using a more robust wildcard pattern to find the file.
+          # This looks for any file that CONTAINS "hakip2host-filtered" and ends in ".txt".
+          
+          find temp-results -name "*hakip2host-filtered*.txt" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$HAKIP2HOST_FINAL_FILE"
           echo "Aggregation complete. Total unique hakip2host findings: $(wc -l < "$HAKIP2HOST_FINAL_FILE")"
 
           # Aggregating caduceus results
+          
           CADUCEUS_FINAL_FILE="final_caduceus_results.txt"
           echo "Aggregating caduceus results into $CADUCEUS_FINAL_FILE..."
-          find temp-results -name "caduceus_chunk_*.txt" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$CADUCEUS_FINAL_FILE"
+          # FIX: Applying the same robust pattern for consistency.
+          
+          find temp-results -name "*caduceus*.txt" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$CADUCEUS_FINAL_FILE"
           echo "Aggregation complete. Total unique caduceus findings: $(wc -l < "$CADUCEUS_FINAL_FILE")"
 
           # Aggregating httpx results
+          
           HTTPX_FINAL_FILE="final_httpx_results.txt"
           echo "Aggregating httpx results into $HTTPX_FINAL_FILE..."
-          find temp-results -name "httpx_results_chunk_*.txt" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$HTTPX_FINAL_FILE"
+          
+          # FIX: Applying the same robust pattern for consistency.
+          
+          find temp-results -name "*httpx_results*.txt" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$HTTPX_FINAL_FILE"
           echo "Aggregation complete. Total unique httpx findings: $(wc -l < "$HTTPX_FINAL_FILE")"
+
 
       - name: Upload final aggregated results
         uses: actions/upload-artifact@v4
