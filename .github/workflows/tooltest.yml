@@ -276,7 +276,7 @@ jobs:
   aggregate_results:
     needs: [prepare_matrix, httpx]
     runs-on: ubuntu-latest
-    if: ${{ needs: prepare_matrix.outputs.matrix != '[]' }}
+    if: ${{ needs.prepare_matrix.outputs.matrix != '[]' }}
     steps:
       - name: Download all per-chunk result directories
         uses: actions/download-artifact@v4
