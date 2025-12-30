@@ -1,339 +1,226 @@
-name: Testing Tools
+name: Testing tools against a file
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Allows you to run this workflow manually
 
 permissions:
-  contents: write
-
-env:
-  MAX_PARALLEL: 20 # <— throttle HTTPX jobs
+  contents: write # We only need to read the repository contents
 
 jobs:
-  prepare_matrix:
+  prepare-chunks:
+    name: Prepare Chunks and Build Matrix
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.set_matrix.outputs.matrix }}
+      matrix: ${{ steps.build_matrix.outputs.matrix }}
+      chunk_count: ${{ steps.build_matrix.outputs.chunk_count }}
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Build chunk matrix from target.txt
-        id: set_matrix
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Create Chunks and Build Matrix
+        id: build_matrix
+        shell: bash
         run: |
+          # Exit on any error, print all commands to the log for debugging
+          set -ex
+          # --- 1. CONFIGURATION AND SETUP ---
           INPUT_FILE="target.txt"
-          CHUNK_DIR="results/chunks"
-
-          # 1. Check if the input file exists
+          CHUNK_SIZE=100
+          CHUNK_DIR="chunks"
           if [ ! -f "$INPUT_FILE" ]; then
-            echo "::error::Input file '$INPUT_FILE' not found!"
-            echo "matrix=[]" >> $GITHUB_OUTPUT
-            exit 0
+            echo "::error::Input file '$INPUT_FILE' not found in the repository root."
+            exit 1
           fi
-
-          # 2. Get the total line count and apply splitting logic
-          LINES=$(wc -l < "$INPUT_FILE")
-          echo "Source $INPUT_FILE has $LINES lines"
           mkdir -p "$CHUNK_DIR"
-
-          if [ "$LINES" -ge 200000 ]; then
-            echo "— ≥200 000 lines: splitting into 50 equal chunks"
-            split -n l/50 \
-                  --numeric-suffixes=1 --suffix-length=2 --additional-suffix=.txt \
-                  "$INPUT_FILE" "$CHUNK_DIR/chunk_"
-          elif [ "$LINES" -gt 1500 ]; then
-            echo "— > 1500 lines: splitting into 20 equal chunks"
-            split -n l/20 \
-                  --numeric-suffixes=1 --suffix-length=2 --additional-suffix=.txt \
-                  "$INPUT_FILE" "$CHUNK_DIR/chunk_"
-          else
-            echo "— ≤ 1500 lines: splitting into 200-line chunks"
-            split -l 200 \
-                  --numeric-suffixes=1 --suffix-length=2 --additional-suffix=.txt \
-                  "$INPUT_FILE" "$CHUNK_DIR/chunk_"
-          fi
-
-          # 3. Debug: list out what we just created
-          echo "Contents of $CHUNK_DIR:"
-          ls -R "$CHUNK_DIR" || echo "(none found)"
-
-          # 4. Build a JSON object for each chunk file
-          pairs=()
-          for CH in "$CHUNK_DIR"/chunk_*; do
-            [ -f "$CH" ] || continue
-            pairs+=( "{\"chunk\":\"$CH\"}" )
-          done
+          echo "-> Splitting '$INPUT_FILE' into chunks of $CHUNK_SIZE lines..."
+          split -l "$CHUNK_SIZE" -a 3 --numeric-suffixes=1 "$INPUT_FILE" "$CHUNK_DIR/chunk_"
           
-          # 5. Emit the chunk-level matrix
-          if [ ${#pairs[@]} -eq 0 ]; then
-            echo "No chunks created. Emitting empty matrix."
-            echo "matrix=[]" >> $GITHUB_OUTPUT
-          else
-            echo "matrix<<EOF" >> $GITHUB_OUTPUT
-            printf '%s\n' "${pairs[@]}" | jq -s . >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
+          echo "-> Chunk files created in '$CHUNK_DIR' directory:"
+          ls -l "$CHUNK_DIR"
+          # --- 2. COUNT THE CHUNKS ---
+          # A simple and reliable way to count the files.
+          CHUNK_COUNT=$(find "$CHUNK_DIR" -type f -name 'chunk_*' | wc -l)
+          if [ "$CHUNK_COUNT" -eq 0 ]; then
+            echo "::warning::Splitting produced 0 chunk files. No work to do."
+            echo "matrix=[]" >> "$GITHUB_OUTPUT"
+            echo "chunk_count=0" >> "$GITHUB_OUTPUT"
+            exit 0 # Exit successfully as there is no work
           fi
-
-      - name: Upload chunks artifact
+          echo "-> Found $CHUNK_COUNT chunk files to process."
+          # --- 3. BUILD THE MATRIX (SIMPLIFIED & DIRECT METHOD) ---
+          # This is the most robust way: list files, pipe to jq to build the JSON.
+          # The jq command transforms each line of input into a JSON object.
+          # The -R (raw input) and -s (slurp) flags read the entire input into a single array.
+          
+          JSON_MATRIX=$(find "$CHUNK_DIR" -type f -name 'chunk_*' | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          # --- 4. VERIFY AND OUTPUT ---
+          echo "-> Verifying that the generated matrix is valid JSON..."
+          echo "$JSON_MATRIX" | jq .
+          
+          echo "-> Matrix verification successful."
+          echo "Final Matrix: $JSON_MATRIX"
+          
+          echo "matrix=$JSON_MATRIX" >> "$GITHUB_OUTPUT"
+          echo "chunk_count=$CHUNK_COUNT" >> "$GITHUB_OUTPUT"
+      - name: Upload Chunks as Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: httpx-chunks
-          path: results/chunks/**
+          name: output-chunks
+          path: chunks/
           retention-days: 1
 
-  httpx:
-    needs: prepare_matrix
+  run-tools-in-parallel:
+    needs: prepare-chunks
+    if: ${{ needs.prepare-chunks.outputs.chunk_count > 0 }}
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/pcoder7/spider-puredns-actions:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GHCR_TOKEN }}
-    if: ${{ needs.prepare_matrix.outputs.matrix != '[]' }}
+    env:
+      # Make this available to all steps
+      CHROME_PATH: /usr/bin/google-chrome-stable    
+      CHUNK_PATH: ${{ matrix.chunk_file }}
     strategy:
       fail-fast: false
       matrix:
-        item: ${{ fromJson(needs.prepare_matrix.outputs.matrix) }}
-      max-parallel: 20
-
+        # This creates a parallel job for each file path in the matrix output from the previous job
+        chunk_file: ${{ fromJson(needs.prepare-chunks.outputs.matrix) }}
     steps:
-      - name: Install dependencies and tools
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+        with:
+          # Fetch full Git history so previous commits are available for comparison
+          fetch-depth: 0   
+          
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Cache Go modules & binaries
+        uses: actions/cache@v3
+        with:
+          path: |
+            $HOME/go/pkg/mod
+            ~/.cache/go-build
+            $HOME/go/bin
+          key: ${{ runner.os }}-go-cache-${{ github.ref_name }}
+          restore-keys: |
+            ${{ runner.os }}-go-cache-
+      - name: Download and Install Google Chrome from .deb file
         run: |
-          # Install system dependencies, including gcc/g++ and build tools
-          apt-get update -y
-          apt-get install -y build-essential git ripgrep
-
-          # Ensure Go tools are in PATH
-          export PATH=$PATH:$(go env GOPATH)/bin
-
-          # Install cut-cdn
-          echo "Installing cut-cdn..."
-          go install github.com/ImAyrix/cut-cdn@latest
-
-          # Install hakip2host
-          echo "Installing hakip2host..."
-          go install github.com/hakluke/hakip2host@latest
-
-          # Install caduceus
-          echo "Installing caduceus..."
-          go install github.com/g0ldencybersec/Caduceus/cmd/caduceus@latest
-
-          # Install CloudRecon
-          echo "Installing CloudRecon..."
-          go install github.com/g0ldencybersec/CloudRecon@latest
-
-          # Install httpx
-          echo "Installing httpx..."
-          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-
-      - name: Download chunk files
+          set -ex
+          CHROME_DEB_URL="http://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_138.0.7204.183-1_amd64.deb"
+          CHROME_DEB_FILE="google-chrome.deb"
+          echo "--- Downloading Chrome package ---"
+          wget -O "$CHROME_DEB_FILE" "$CHROME_DEB_URL"
+          echo "--- Installing Chrome package and dependencies ---"
+          # Using "apt-get install -y ./" is the modern way to install a local .deb
+          # file because it automatically handles and installs missing dependencies.
+          sudo apt-get update
+          sudo apt-get install -y ./"$CHROME_DEB_FILE"
+          
+          echo "--- Verifying installation ---"
+          # dpkg places the binary in /usr/bin/google-chrome-stable
+          ls -l /usr/bin/google-chrome-stable
+          /usr/bin/google-chrome-stable --version
+      - name: Install GoWitness
+        run: |
+          # if you don't have gowitness already:
+          GO111MODULE=on go install github.com/sensepost/gowitness@latest
+          # ensure $GOPATH/bin is on PATH
+          echo "${{ runner.tool_cache }}/go/bin" >> $GITHUB_PATH
+      - name: Download Chunks Artifact
         uses: actions/download-artifact@v4
         with:
-          name: httpx-chunks
-          # This will create results/chunks/ and place the files inside it.
-          path: results/chunks
-
-      - name: List downloaded files (for debugging)
+          name: output-chunks
+          path: chunks/
+     
+      - name: Debug Matrix Context
         run: |
-          echo "Listing files in the workspace to confirm download location:"
-          ls -R
-
-      - name: Process ${{ matrix.item.chunk }} with cut-cdn, hakip2host, caduceus, and httpx
+          echo "matrix.chunk_file = ${{ matrix.chunk_file }}"
+      - name: Run GoWitness screenshots
+        id: run_tool
+        shell: bash
         run: |
-          CH_PATH="${{ matrix.item.chunk }}"
-          CH_BASENAME=$(basename "$CH_PATH")
-          OUT_DIR="results/processed_out"
-          mkdir -p "$OUT_DIR"
-
-          if [ ! -f "$CH_PATH" ]; then
-            echo "::error::File not found at the expected path: $CH_PATH"
+          set -ex
+          # verify chunk file exists
+          if [ ! -f "$CHUNK_PATH" ]; then
+            echo "::error:: Chunk file '$CHUNK_PATH' not found"
+            ls -R .
             exit 0
           fi
+          # derive basename for artifact naming
+          BASENAME=$(basename "$CHUNK_PATH")
+          echo "basename=$BASENAME" >> $GITHUB_OUTPUT
+         
+                       
+          OUTPUT_DIR="screenshots"
+          mkdir -p "$OUTPUT_DIR"
           
-          echo "▶ Processing $CH_PATH"
-
-          # 1. Filter with cut-cdn (NO CHANGES HERE)
-          NO_CDN_FILE="$OUT_DIR/No-CDN_${CH_BASENAME}"
-          echo "Running cut-cdn on $CH_PATH..."
-          cat "$CH_PATH" | cut-cdn -ua -t 50 -q -o "$NO_CDN_FILE"
-          LINES_NO_CDN=$(wc -l < "$NO_CDN_FILE")
-          echo "  $LINES_NO_CDN lines after cut-cdn"
-
-          # 2. Run hakip2host on No-CDN output and filter (NO CHANGES HERE)
-          HAKIP2HOST_RAW_FILE="$OUT_DIR/hakip2host_raw_${CH_BASENAME}"
-          HAKIP2HOST_FILTERED_FILE="$OUT_DIR/hakip2host_filtered_${CH_BASENAME}"
-          echo "Running hakip2host on $NO_CDN_FILE..."
-          if [ "$LINES_NO_CDN" -gt 0 ]; then
-            mkdir -p "$(dirname "$HAKIP2HOST_RAW_FILE")"
-            cat "$NO_CDN_FILE" | hakip2host | sort -u > "$HAKIP2HOST_RAW_FILE"
-            echo "Filtering hakip2host output..."
-            grep -Ev 'amazonaws\.com|aws\.com|\.aws|wordpress\.com' "$HAKIP2HOST_RAW_FILE" \
-              | awk -F'[[:space:]]' '{print $3}' | sort -u > "$HAKIP2HOST_FILTERED_FILE"
-          else
-            touch "$HAKIP2HOST_FILTERED_FILE"
-          fi
-          LINES_HAKIP2HOST=$(wc -l < "$HAKIP2HOST_FILTERED_FILE")
-          echo "  $LINES_HAKIP2HOST unique domains after hakip2host filtering"
-
-          # 3. Run Caduceus on original IP chunk (NO CHANGES HERE)
-          CADUCEUS_FILE="$OUT_DIR/caduceus_${CH_BASENAME}"
-          echo "Running Caduceus on $CH_PATH..."
-          caduceus -i "$CH_PATH" | sort -u > "$CADUCEUS_FILE"
-          LINES_CADUCEUS=$(wc -l < "$CADUCEUS_FILE")
-          echo "  $LINES_CADUCEUS lines after Caduceus"
-
-          # 4. Create a combined, unique target list for httpx (NO CHANGES HERE)
-          COMBINED_TARGETS_FILE="$OUT_DIR/combined_targets_${CH_BASENAME}"
-          echo "Combining hakip2host and caduceus outputs for httpx..."
-          cat "$HAKIP2HOST_FILTERED_FILE" "$CADUCEUS_FILE" | sort -u > "$COMBINED_TARGETS_FILE"
-          LINES_COMBINED=$(wc -l < "$COMBINED_TARGETS_FILE")
-          echo "  $LINES_COMBINED unique targets for httpx"
+          OUTPUT_FILE="$OUTPUT_DIR/result_${BASENAME}"
+          mkdir -p "$OUTPUT_FILE"
           
-          # --- vvvvvvvvvvvvvvvv START OF CHANGES vvvvvvvvvvvvvvvv ---
-
-          # 5. Run httpx on the combined target list
-          HTTPX_OUT_DIR="results/httpx_out"
-          mkdir -p "$HTTPX_OUT_DIR"
-          # CHANGE: Using a more consistent base name for all output files
-          HTTPX_OUTPUT_PREFIX="${HTTPX_OUT_DIR}/httpx_results_${CH_BASENAME%.txt}"
-          HTTPX_FINAL_OUTPUT_PATH="${HTTPX_OUTPUT_PREFIX}.txt"
-
-          echo "Running httpx on $COMBINED_TARGETS_FILE — $LINES_COMBINED lines"
-          # Add a debug step to ensure the input file is not empty
-          echo "--- START of httpx input file ---"
-          head -n 10 "$COMBINED_TARGETS_FILE"
-          echo "--- END of httpx input file ---"
-
-          if [ "$LINES_COMBINED" -le 1500 ]; then
-            # small: single httpx run
-            echo "— ≤1500 lines: single httpx with 100 threads"
-            # CHANGE: Removed -silent, added -status-code and -no-color to capture ALL results
-            httpx -l "$COMBINED_TARGETS_FILE" -threads 100 -status-code -no-color \
-              -o "${HTTPX_FINAL_OUTPUT_PATH}" 
-          else
-            # big: split into sub-chunks and run with GNU Parallel
-            TMP=$(mktemp -d)
-            split -l 1500 --numeric-suffixes=1 --suffix-length=2 \
-                  --additional-suffix=.txt \
-                  "$COMBINED_TARGETS_FILE" "$TMP/sub_"
-
-            if [ "$LINES_COMBINED" -gt 35000 ]; then JOBS=12; THREADS=250
-            elif [ "$LINES_COMBINED" -gt 15000 ]; then JOBS=10; THREADS=200
-            else JOBS=8; THREADS=100
-            fi
-
-            echo "— Launching parallel -j$JOBS with $THREADS threads"
-            parallel -j"$JOBS" \
-              # CHANGE: Removed -silent, added -status-code and -no-color to capture ALL results
-              httpx -l {} -threads "$THREADS" -retries 1 -random-agent -timeout 10 -status-code -no-color -silent \
-                    # CHANGE: Simplified and unified the output file naming
-                    -o "${HTTPX_OUTPUT_PREFIX}_{/.}.txt"
-              ::: "$TMP"/sub_*.txt
-            rm -rf "$TMP"
-          fi
+          echo "Running httpx on $CHUNK_PATH → $OUTPUT_FILE"
           
-          # For debugging: List the files created by httpx before consolidation
-          echo "Listing raw httpx output files before consolidation:"
-          ls -l "$HTTPX_OUT_DIR"
-
-          # Consolidate httpx results for this chunk
-          # CHANGE: Drastically simplified the 'find' command to use our new unified prefix
-          find "$HTTPX_OUT_DIR" -maxdepth 1 -type f -name "httpx_results_${CH_BASENAME%.txt}*.txt" -print0 \
-            | xargs -0 --no-run-if-empty cat \
-            | sort -u > "${HTTPX_FINAL_OUTPUT_PATH}.tmp" && mv "${HTTPX_FINAL_OUTPUT_PATH}.tmp" "${HTTPX_FINAL_OUTPUT_PATH}"
-
-          # Cleanup intermediate sub-chunk results
-          # CHANGE: Simplified the cleanup command to match the new naming scheme
-          find "$HTTPX_OUT_DIR" -maxdepth 1 -type f -name "httpx_results_${CH_BASENAME%.txt}_sub_*.txt" -delete
-
-      - name: Prepare artifact for upload
-        id: art_details
+          gowitness scan file -f "$CHUNK_PATH" \
+            --threads 10 \
+            --delay 1 \
+            --timeout 40 \
+            --chrome-path "/usr/bin/google-chrome-stable" \
+            --screenshot-fullpage \
+            --screenshot-path "$OUTPUT_FILE" \
+            --write-jsonl \
+            --debug-log
+       
+          echo "basename=$BASENAME" >> $GITHUB_OUTPUT 
+          ls -lr "$OUTPUT_FILE"
+          
+          echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
+          
+      - name: Compute Safe Chunk Name
+        id: safe_chunk
         run: |
-          CH_BASENAME=$(basename "${{ matrix.item.chunk }}")
-          ARTIFACT_NAME="results-${CH_BASENAME%.txt}" # e.g., results-chunk_01
-          ARTIFACT_DIR="staging/${ARTIFACT_NAME}"     # e.g., staging/results-chunk_01
-
-          echo "Preparing artifact directory: ${ARTIFACT_DIR}"
-          mkdir -p "$ARTIFACT_DIR"
-
-          # Move result files into the staging directory
-          # Using --no-clobber to prevent errors if a file doesn't exist
-          mv -n "results/processed_out/hakip2host_filtered_${CH_BASENAME}" "$ARTIFACT_DIR/"
-          mv -n "results/processed_out/caduceus_${CH_BASENAME}" "$ARTIFACT_DIR/"
-          mv -n "results/httpx_out/httpx_results_${CH_BASENAME}" "$ARTIFACT_DIR/"
-          
-          echo "artifact_name=${ARTIFACT_NAME}" >> $GITHUB_OUTPUT
-          echo "artifact_path=${ARTIFACT_DIR}" >> $GITHUB_OUTPUT
-
-      - name: Upload per-chunk results directory
+          SAFE_CHUNK="$(echo "${{ steps.run_tool.outputs.basename }}" )"
+          echo "safe_chunk=$SAFE_CHUNK" >> $GITHUB_OUTPUT
+      - name: Upload Individual Result Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.art_details.outputs.artifact_name }}
-          path: ${{ steps.art_details.outputs.artifact_path }}
-          if-no-files-found: ignore
+          name: result-${{ steps.safe_chunk.outputs.safe_chunk }}
+          path: ${{ steps.run_tool.outputs.output_file }}
           retention-days: 1
-
-
-  aggregate_results:
-    needs: [prepare_matrix, httpx]
+       
+   
+  aggregate-results:
+    needs: run-tools-in-parallel
+    if: always() # run even if some jobs fail
     runs-on: ubuntu-latest
-    if: ${{ needs.prepare_matrix.outputs.matrix != '[]' }}
     steps:
-      - name: Download all per-chunk result directories
+      - name: Create Temporary Directory for Results
+        run: mkdir -p temp-results
+
+      - name: Download All Result Artifacts
         uses: actions/download-artifact@v4
         with:
-          path: temp-results
-          pattern: results-chunk_*
-          # CRITICAL FIX: The line 'merge-multiple: true' has been removed.
-          # This will now create a directory for each artifact, like:
-          # temp-results/results-chunk_01/
-          # temp-results/results-chunk_02/
-          
-      # HELPFUL DEBUGGING STEP: This will show you the exact directory structure.
-      - name: List downloaded files for verification
+          path: temp-results/
+          # ← match your sanitized names: "chunks/chunk_009" → "chunks_chunk_009"
+          pattern: 'result-chunks_chunk_*'
+          merge-multiple: true
+
+      - name: List Downloaded Files
         run: |
-          echo "Verifying downloaded artifact structure:"
-          ls -R temp-results
-
-      - name: Aggregate all chunk results
+          echo "Files in temp-results/:"
+          ls -al temp-results/
+      - name: Aggregate All Results into a Single File
+        id: aggregate
         run: |
-          
-
-          # Aggregating hakip2host filtered results
-          HAKIP2HOST_FINAL_FILE="final_hakip2host_filtered_results.txt"
-          echo "Aggregating hakip2host filtered results into $HAKIP2HOST_FINAL_FILE..."
-          
-          # FIX: Using a more robust wildcard pattern to find the file.
-          # This looks for any file that CONTAINS "hakip2host-filtered" and ends in ".txt".
-          
-          find temp-results -name "*hakip2host-filtered*.txt" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$HAKIP2HOST_FINAL_FILE"
-          echo "Aggregation complete. Total unique hakip2host findings: $(wc -l < "$HAKIP2HOST_FINAL_FILE")"
-
-          # Aggregating caduceus results
-          
-          CADUCEUS_FINAL_FILE="final_caduceus_results.txt"
-          echo "Aggregating caduceus results into $CADUCEUS_FINAL_FILE..."
-          # FIX: Applying the same robust pattern for consistency.
-          
-          find temp-results -name "*caduceus*.txt" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$CADUCEUS_FINAL_FILE"
-          echo "Aggregation complete. Total unique caduceus findings: $(wc -l < "$CADUCEUS_FINAL_FILE")"
-
-          # Aggregating httpx results
-          
-          HTTPX_FINAL_FILE="final_httpx_results.txt"
-          echo "Aggregating httpx results into $HTTPX_FINAL_FILE..."
-          
-          # FIX: Applying the same robust pattern for consistency.
-          
-          find temp-results -name "*httpx_results*.txt" -print0 | xargs -0 --no-run-if-empty cat | sort -u > "$HTTPX_FINAL_FILE"
-          echo "Aggregation complete. Total unique httpx findings: $(wc -l < "$HTTPX_FINAL_FILE")"
-
-
-      - name: Upload final aggregated results
+          echo "Aggregating all results..."
+          cat temp-results/* | sort -u > nuclei-final-results.txt
+          echo "Final aggregated results created at nuclei-final-results.txt"
+          echo "Total unique findings: $(wc -l < nuclei-final-results.txt)"
+      - name: Upload Final Aggregated Results
         uses: actions/upload-artifact@v4
         with:
-          name: final-aggregated-results
-          path: |
-            final_hakip2host_filtered_results.txt
-            final_caduceus_results.txt
-            final_httpx_results.txt
+          name: final-nuclei-results
+          path: nuclei-final-results.txt
           retention-days: 1
